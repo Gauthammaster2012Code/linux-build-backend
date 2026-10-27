@@ -1,0 +1,35 @@
+{
+  "name": "@linxgen/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./convex/_generated/api": "./convex/_generated/api.js",
+    "./convex/_generated/dataModel": "./convex/_generated/dataModel.d.ts",
+    "./convex/_generated/server": "./convex/_generated/server.js"
+  },
+  "scripts": {
+    "dev": "convex dev",
+    "codegen": "convex codegen",
+    "deploy": "convex deploy",
+    "typecheck": "tsc -p convex/tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@convex-dev/better-auth": "0.12.5",
+    "@linxgen/spec": "workspace:*",
+    "aws4fetch": "^1.0.20",
+    "better-auth": "~1.6.33",
+    "convex": "1.47.0",
+    "jose": "^6.2.13",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^24.10.1",
+    "convex-test": "0.0.62",
+    "typescript": "^5.9.3",
+    "vite": "8.3.4",
+    "vitest": "^4.0.15"
+  }
+}
