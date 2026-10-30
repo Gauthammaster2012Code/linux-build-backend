@@ -40,7 +40,7 @@ npx convex deploy            # or `npx convex dev` for a development deployment
 
 `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and the Cloudflare R2 variables (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) are no longer used. Remove them if an older deployment still has them. Files left in an old R2 bucket are not migrated; delete the bucket when you no longer need them.
 
-`scripts/configure-production.sh` asks for the values only the owner has (web app URL, GitHub App, Backblaze B2, the optional LinxGen Storage app, Ollama, the owner email), saves them on the production deployment without showing or writing them anywhere, creates the owner's invite code and runs `setup:verify`. Set `LINXGEN_CONVEX_DEPLOYMENT` to target a deployment other than `gautham-r-krishna:linxgen:production`.
+`scripts/configure-production.sh` saves the values only the owner has on the production deployment without showing or writing them anywhere. Run with no arguments, it shows what is already set and asks only for required values that are still missing: web app URL, GitHub App, Backblaze B2 and the owner email (then it offers to create the owner's invite code). Optional features and values that are already set are skipped. To change a value or turn on an optional feature, name its section: `site`, `github`, `storage`, `owner`, `github-storage` (the LinxGen Storage app), `ai` (the platform Ollama key) or `all`, for example `scripts/configure-production.sh github-storage`. It finishes by running `setup:verify` and listing only the checks that need attention. Set `LINXGEN_CONVEX_DEPLOYMENT` to target a deployment other than `gautham-r-krishna:linxgen:production`.
 
 ### Sign-in and invitations
 
@@ -127,7 +127,7 @@ Members can copy a finished build to a private repository in **their own** GitHu
    - Repository permissions: **Administration: Read and write** (to create the private storage repository), **Contents: Read and write** (to create releases and upload files), Metadata: Read-only (always on). No other repository, organization or account permissions.
    - Where can this app be installed: **Any account**.
 2. Generate a client secret and a private key on the app's page.
-3. Set `STORAGE_GITHUB_APP_ID`, `STORAGE_GITHUB_APP_SLUG` (the app's URL name), `STORAGE_GITHUB_APP_CLIENT_ID`, `STORAGE_GITHUB_APP_CLIENT_SECRET` and `STORAGE_GITHUB_APP_PRIVATE_KEY` on Convex (`scripts/configure-production.sh` asks for them).
+3. Set `STORAGE_GITHUB_APP_ID`, `STORAGE_GITHUB_APP_SLUG` (the app's URL name), `STORAGE_GITHUB_APP_CLIENT_ID`, `STORAGE_GITHUB_APP_CLIENT_SECRET` and `STORAGE_GITHUB_APP_PRIVATE_KEY` on Convex (`scripts/configure-production.sh github-storage` asks for them).
 4. Push `.github/workflows/linxgen-save.yml` to the build repository with the build workflow. The build app dispatches it, so it needs no new permissions there.
 
 How connecting works:
