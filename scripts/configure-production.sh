@@ -69,6 +69,7 @@ ask() {
 }
 
 valid_site_url() { [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; }
+valid_email() { [[ "$1" =~ ^[^[:space:]@\"\\]+@[^[:space:]@\"\\]+\.[^[:space:]@\"\\]+$ ]]; }
 valid_digits() { [[ "$1" =~ ^[0-9]{1,20}$ ]]; }
 valid_b2_endpoint() { [[ "$1" =~ ^https://s3\.[a-z0-9-]+\.backblazeb2\.com$ ]]; }
 valid_bucket() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9-]{4,48}[A-Za-z0-9]$ ]]; }
@@ -179,12 +180,14 @@ ask PLATFORM_OLLAMA_API_KEY "Ollama Cloud API key (hidden)" valid_api_key "The k
 ask PLATFORM_OLLAMA_MODEL "Model (default gpt-oss:120b)" valid_model "Use a model name such as gpt-oss:120b."
 
 echo
-bold "5. First administrator"
-info "Creates a one-time admin invite code. Use it on the web app's 'Create account' form with this email."
-info "Only works once the backend code is deployed. Running it again replaces the earlier code."
-read -r -p "  Admin email (Enter to skip): " ADMIN_EMAIL
+bold "5. Owner and first invite code"
+info "The owner is the only account that can create invite codes, under Settings > Invitations in the web app."
+ask OWNER_EMAIL "Owner email" valid_email "Enter an email address such as you@example.com."
+info "Next, create a one-time admin invite code for the owner. Use it on the web app's 'Create account' form"
+info "with the owner email. Only works once the backend code is deployed. Running it again replaces the earlier code."
+read -r -p "  Owner email for the invite code (Enter to skip): " ADMIN_EMAIL
 if [[ -n "$ADMIN_EMAIL" ]]; then
-  if [[ "$ADMIN_EMAIL" =~ ^[^[:space:]@\"\\]+@[^[:space:]@\"\\]+\.[^[:space:]@\"\\]+$ ]]; then
+  if valid_email "$ADMIN_EMAIL"; then
     if ! convex run admin:bootstrapAdmin "{\"email\":\"$ADMIN_EMAIL\"}"; then
       warn "Could not create the invitation. Deploy the backend first, then run this script again."
       FAILURES+=("admin invitation")

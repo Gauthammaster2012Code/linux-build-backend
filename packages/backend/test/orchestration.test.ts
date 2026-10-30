@@ -219,7 +219,8 @@ describe("membership", () => {
   it("restricts admin functions", async () => {
     const t = newTest();
     const user = await addMember(t, 1);
-    await expect(user.as.mutation(api.admin.createInvitation, { email: "x@example.com", role: "member" })).rejects.toThrow(/Administrator/);
+    await expect(user.as.mutation(api.admin.createInvitation, { email: "x@example.com", role: "member" })).rejects.toThrow(/owner/);
+    await expect(user.as.query(api.admin.overview, {})).rejects.toThrow(/Administrator/);
   });
 });
 

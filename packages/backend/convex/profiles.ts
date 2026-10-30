@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { authComponent } from "./auth";
-import { appError, ERR, getSessionUserId } from "./lib/access";
+import { appError, ERR, getSessionUserId, isOwner } from "./lib/access";
 import { ATTEMPT_LIMITS, consumeAttempt } from "./lib/attempts";
 import { checkInviteCode, normalizeEmail } from "./lib/invites";
 
@@ -53,6 +53,7 @@ async function publicProfile(ctx: QueryCtx, p: Doc<"profiles">) {
     name: p.name,
     image: p.image,
     role: p.role,
+    isOwner: isOwner(p),
     status: p.status,
     aiSelection: selection,
     aiSelectionMissing: selection.source === "personal" && (!connection || connection.ownerId !== p._id),
@@ -116,7 +117,7 @@ export const acceptInvitation = mutation({
     const check = await checkInviteCode(ctx, code, profile.email);
     if (!check.ok) {
       return check.reason === "expired"
-        ? { ok: false as const, code: "INVITE_CODE_EXPIRED", message: "This invite code has expired. Ask an administrator for a new one." }
+        ? { ok: false as const, code: "INVITE_CODE_EXPIRED", message: "This invite code has expired. Ask the owner for a new one." }
         : { ok: false as const, code: "INVITE_CODE_INVALID", message: "This invite code is not valid for your email address." };
     }
     const now = Date.now();

@@ -9,6 +9,7 @@ import { modules } from "../convex/test.setup";
 
 const VARS = [
   "SITE_URL",
+  "OWNER_EMAIL",
   "BETTER_AUTH_SECRET",
   "CREDENTIAL_ENCRYPTION_KEYS",
   "RUNNER_CAPABILITY_SECRET",
@@ -68,6 +69,7 @@ describe("setup:verify", () => {
     const checks = byName(report.checks);
     expect(report.ok).toBe(false);
     expect(checks["env:SITE_URL"]).toMatchObject({ ok: false, detail: "Missing." });
+    expect(checks["env:OWNER_EMAIL"]).toMatchObject({ ok: false, detail: "Missing." });
     expect(checks["env:GITHUB_APP_PRIVATE_KEY"]).toMatchObject({ ok: false, detail: "Missing." });
     expect(checks["env:STORAGE_BUCKET"]).toMatchObject({ ok: false, detail: "Missing." });
     expect(checks["env:STORAGE_SECRET_ACCESS_KEY"]).toMatchObject({ ok: true });
@@ -93,6 +95,7 @@ describe("setup:verify", () => {
     });
     Object.assign(process.env, {
       SITE_URL: "https://linxgen.example.com",
+      OWNER_EMAIL: "owner@example.com",
       BETTER_AUTH_SECRET: "a".repeat(40),
       CREDENTIAL_ENCRYPTION_KEYS: JSON.stringify({ current: "v1", keys: { v1: bytesToBase64(new Uint8Array(32)) } }),
       RUNNER_CAPABILITY_SECRET: "r".repeat(40),

@@ -2,14 +2,12 @@ import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { ACTIVE_RUNNER_STATUSES, MAX_ARTIFACT_RETENTION_HOURS, MIN_ARTIFACT_RETENTION_HOURS, validRetentionHours } from "@linxgen/spec";
 import { internalMutation, mutation, query } from "./_generated/server";
-import { appError, ERR, requireAdmin, requireMember } from "./lib/access";
+import { appError, ERR, isOwnerEmail, requireAdmin, requireMember, requireOwner } from "./lib/access";
 import { requestCancel, unfinishedBuilds } from "./lib/buildOps";
 import { DEFAULT_SETTINGS, MAX_BUILD_TIMEOUT_MINUTES } from "./lib/config";
-import { issueInvitation, normalizeEmail } from "./lib/invites";
+import { EMAIL_PATTERN, issueInvitation, normalizeEmail } from "./lib/invites";
 import { getSettings, getSettingsDoc } from "./lib/settings";
 import { storageUsage } from "./lib/storageBudget";
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function validEmail(email: string): string {
   const normalized = normalizeEmail(email);
@@ -27,6 +25,7 @@ export const listMembers = query({
       email: p.email,
       name: p.name,
       role: p.role,
+      isOwner: isOwnerEmail(p.email),
       status: p.status,
       createdAt: p.createdAt,
       revokedAt: p.revokedAt,
@@ -37,7 +36,7 @@ export const listMembers = query({
 export const listInvitations = query({
   args: {},
   handler: async (ctx) => {
-    await requireAdmin(ctx);
+    await requireOwner(ctx);
     const invitations = await ctx.db.query("invitations").order("desc").take(500);
     return invitations.map((i) => ({
       invitationId: i._id,
@@ -54,15 +53,15 @@ export const createInvitation = mutation({
   args: { email: v.string(), role: v.union(v.literal("member"), v.literal("admin")) },
   /** Returns the one-time code. Only its hash is stored, so it cannot be shown again. */
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx);
-    return issueInvitation(ctx, { email: validEmail(args.email), role: args.role, invitedBy: admin._id });
+    const owner = await requireOwner(ctx);
+    return issueInvitation(ctx, { email: validEmail(args.email), role: args.role, invitedBy: owner._id });
   },
 });
 
 export const revokeInvitation = mutation({
   args: { invitationId: v.id("invitations") },
   handler: async (ctx, { invitationId }) => {
-    await requireAdmin(ctx);
+    await requireOwner(ctx);
     const inv = await ctx.db.get(invitationId);
     if (!inv) throw appError(ERR.notFound, "Invitation not found.");
     if (inv.status === "pending") await ctx.db.patch(invitationId, { status: "revoked" });
@@ -76,6 +75,7 @@ export const setMembership = mutation({
     if (profileId === admin._id && status === "revoked") throw appError(ERR.forbidden, "You cannot revoke your own membership.");
     const profile = await ctx.db.get(profileId);
     if (!profile) throw appError(ERR.notFound, "Member not found.");
+    if (isOwnerEmail(profile.email)) throw appError(ERR.forbidden, "The owner's membership cannot be changed.");
     if (status === "active" && profile.status === "pending") {
       throw appError(ERR.forbidden, "Pending users join through an invitation.");
     }
@@ -91,6 +91,9 @@ export const setRole = mutation({
   handler: async (ctx, { profileId, role }) => {
     const admin = await requireAdmin(ctx);
     if (profileId === admin._id && role !== "admin") throw appError(ERR.forbidden, "You cannot remove your own admin role.");
+    const profile = await ctx.db.get(profileId);
+    if (!profile) throw appError(ERR.notFound, "Member not found.");
+    if (isOwnerEmail(profile.email) && role !== "admin") throw appError(ERR.forbidden, "The owner's admin role cannot be removed.");
     await ctx.db.patch(profileId, { role });
   },
 });
@@ -202,7 +205,8 @@ export const overview = query({
 
 /**
  * Creates an admin invitation and returns its one-time code. It never activates an existing account: the person signs
- * up (or, if already signed up, enters the code) to become an administrator. Run from the CLI:
+ * up (or, if already signed up, enters the code) to become an administrator. Use it for the owner (OWNER_EMAIL), who
+ * then issues every other code from the web app. Run from the CLI:
  *   npx convex run admin:bootstrapAdmin '{"email":"you@example.com"}'
  */
 export const bootstrapAdmin = internalMutation({

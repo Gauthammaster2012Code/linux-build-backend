@@ -10,6 +10,7 @@ import {
   storageConfig,
 } from "./config";
 import { base64ToBytes } from "./crypto";
+import { EMAIL_PATTERN } from "./invites";
 import { getRepository, getWorkflow, GitHubError, installationToken } from "./github";
 import { getStorageApp } from "./githubStorage";
 import { ObjectStorage, StorageError } from "./objectStorage";
@@ -24,6 +25,7 @@ export interface SetupCheck {
 
 const REQUIRED_VARS = [
   "SITE_URL",
+  "OWNER_EMAIL",
   "BETTER_AUTH_SECRET",
   "CREDENTIAL_ENCRYPTION_KEYS",
   "RUNNER_CAPABILITY_SECRET",
@@ -84,6 +86,10 @@ function checkVariable(name: (typeof REQUIRED_VARS)[number]): SetupCheck {
     switch (name) {
       case "SITE_URL":
         return checkSiteUrl(value);
+      case "OWNER_EMAIL":
+        return EMAIL_PATTERN.test(value.trim())
+          ? check(true, "Set. That account is the only one that can issue invite codes.")
+          : check(false, "Set, but not an email address.");
       case "BETTER_AUTH_SECRET":
         return value.length >= 32 ? check(true, "Set.") : check(false, "Set, but shorter than 32 characters.");
       case "CREDENTIAL_ENCRYPTION_KEYS": {

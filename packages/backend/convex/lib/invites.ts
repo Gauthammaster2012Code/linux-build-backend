@@ -32,6 +32,8 @@ export function hashInviteCode(normalized: string): Promise<string> {
   return sha256Hex(`linxgen-invite:v1:${normalized}`);
 }
 
+export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
