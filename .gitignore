@@ -1,10 +1,16 @@
-node_modules
-.env
+node_modules/
+.next/
 dist/
-temp/
-.env.local
+coverage/
 .env
-# Build artifacts
-artifacts/*
-!artifacts/.gitkeep
-conv.txt
+.env.local
+.env.*.local
+*.log
+.convex/
+.turbo/
+out/
+builder/work/
+*.iso
+*.tar.gz
+*.tsbuildinfo
+.vercel/

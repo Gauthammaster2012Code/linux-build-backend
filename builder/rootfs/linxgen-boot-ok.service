@@ -1,0 +1,12 @@
+[Unit]
+Description=LinxGen boot verification marker
+After=basic.target systemd-user-sessions.service
+Wants=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/linxgen/boot-marker.sh
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

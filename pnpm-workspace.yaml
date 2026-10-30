@@ -1,0 +1,12 @@
+packages:
+  - "packages/*"
+
+# vitest resolves its own vite; keep every copy on the same qualified release.
+overrides:
+  vite: 8.3.4
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+  "@tailwindcss/oxide": true
+  unrs-resolver: true
