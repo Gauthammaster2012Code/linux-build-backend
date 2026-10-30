@@ -68,7 +68,9 @@ export BUILD_SYSTEM="Ubuntu"
 export FLAVOUR="LinxGen"
 CONF
 
-apt_flags=(-y -q)
+# casper.conf above is already in place when casper installs. Without these options dpkg asks whether to keep it,
+# finds no answer on stdin and fails the install; keeping the existing file is the intended answer.
+apt_flags=(-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 [[ $recommends == true ]] || apt_flags+=(--no-install-recommends)
 in_chroot apt-get update -q
 log "installing $(wc -l <"$work/packages.iso.list") packages"
