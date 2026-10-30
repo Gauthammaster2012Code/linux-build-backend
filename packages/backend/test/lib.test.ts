@@ -186,6 +186,22 @@ describe("B2 object storage", () => {
     expect(xml).toContain('<ETag>"e2"</ETag>');
   });
 
+  it("passes request bodies to fetch as strings so a Content-Length is sent", async () => {
+    const calls: { input: RequestInfo | URL; init?: RequestInit }[] = [];
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+    await new ObjectStorage(B2, fetchImpl).putObject("k/probe", "ok", "text/plain");
+    expect(calls[0]!.input).not.toBeInstanceOf(Request);
+    expect(String(calls[0]!.input)).toBe("https://s3.us-west-004.backblazeb2.com/artifacts/k/probe");
+    expect(calls[0]!.init?.method).toBe("PUT");
+    expect(calls[0]!.init?.body).toBe("ok");
+    const headers = new Headers(calls[0]!.init?.headers);
+    expect(headers.get("content-type")).toBe("text/plain");
+    expect(headers.get("authorization")).toMatch(/Credential=AKID\/\d{8}\/us-west-004\/s3\/aws4_request/);
+  });
+
   it("deletes every stored version so the bytes are not kept as hidden versions", async () => {
     const calls: string[] = [];
     const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
