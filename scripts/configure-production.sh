@@ -28,7 +28,7 @@ cd "$REPO_ROOT/packages/backend"
 
 convex() { node_modules/.bin/convex "$@" --deployment "$DEPLOYMENT"; }
 
-EXISTING="$(convex env list 2>/dev/null | cut -d= -f1)" ||
+EXISTING="$(convex env list --names-only 2>/dev/null)" ||
   die "cannot reach the Convex deployment $DEPLOYMENT. Log in with 'npx convex login' and try again."
 
 is_set() { grep -qx "$1" <<<"$EXISTING"; }
