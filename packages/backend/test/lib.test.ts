@@ -81,8 +81,18 @@ describe("runner OIDC", () => {
   });
 
   it("keeps build and save workflow tokens apart", () => {
-    const env = { GITHUB_REPOSITORY: process.env.GITHUB_REPOSITORY };
+    const env = {
+      GITHUB_REPOSITORY: process.env.GITHUB_REPOSITORY,
+      GITHUB_REPOSITORY_ID: process.env.GITHUB_REPOSITORY_ID,
+      GITHUB_WORKFLOW_REF: process.env.GITHUB_WORKFLOW_REF,
+      GITHUB_WORKFLOW_FILE: process.env.GITHUB_WORKFLOW_FILE,
+      GITHUB_SAVE_WORKFLOW_FILE: process.env.GITHUB_SAVE_WORKFLOW_FILE,
+    };
     process.env.GITHUB_REPOSITORY = "acme/linxgen-v2";
+    delete process.env.GITHUB_REPOSITORY_ID;
+    delete process.env.GITHUB_WORKFLOW_REF;
+    delete process.env.GITHUB_WORKFLOW_FILE;
+    delete process.env.GITHUB_SAVE_WORKFLOW_FILE;
     try {
       const build = runnerTrustConfig("build");
       const save = runnerTrustConfig("save");
@@ -93,8 +103,11 @@ describe("runner OIDC", () => {
       expect(() => checkRunnerClaims(claims, save)).toThrow(/Untrusted workflow/);
       expect(checkRunnerClaims(saveClaims, save)).toMatchObject({ runId: "123" });
     } finally {
-      if (env.GITHUB_REPOSITORY === undefined) delete process.env.GITHUB_REPOSITORY;
-      else process.env.GITHUB_REPOSITORY = env.GITHUB_REPOSITORY;
+      for (const key of Object.keys(env) as Array<keyof typeof env>) {
+        const value = env[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 
