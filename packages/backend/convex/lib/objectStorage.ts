@@ -1,4 +1,4 @@
-import { AwsClient } from "aws4fetch";
+import { AwsV4Signer } from "aws4fetch";
 
 export interface ObjectStorageSettings {
   /** https origin of the S3-compatible API, for example https://s3.us-west-004.backblazeb2.com. */
@@ -14,31 +14,49 @@ export class StorageError extends Error {}
 
 type FetchLike = typeof fetch;
 
+interface SigningCredentials {
+  accessKeyId: string;
+  secretAccessKey: string;
+  service: string;
+  region: string;
+  cache: Map<string, ArrayBuffer>;
+}
+
 /**
  * S3-compatible access to the private temporary-storage bucket (Backblaze B2). Only the backend holds these
  * credentials; runners and browsers get presigned URLs. Requests use path-style URLs
  * (`<endpoint>/<bucket>/<key>`), which B2 documents for every operation.
  */
 export class ObjectStorage {
-  private readonly client: AwsClient;
+  private readonly credentials: SigningCredentials;
   private readonly base: string;
+  private readonly fetchImpl: FetchLike | undefined;
 
   constructor(cfg: ObjectStorageSettings, fetchImpl?: FetchLike) {
-    this.client = new AwsClient({
+    this.credentials = {
       accessKeyId: cfg.accessKeyId,
       secretAccessKey: cfg.secretAccessKey,
       service: "s3",
       region: cfg.region,
-    });
+      cache: new Map(),
+    };
     this.base = `${cfg.endpoint.replace(/\/+$/, "")}/${encodeURIComponent(cfg.bucket)}`;
     this.fetchImpl = fetchImpl;
   }
 
-  private readonly fetchImpl: FetchLike | undefined;
+  /**
+   * The body is passed to fetch as the original string. Wrapping the signed request in a `Request` (as
+   * `AwsClient.sign` does) turns the body into a stream, which fetch sends with chunked transfer encoding and no
+   * Content-Length; B2 rejects such uploads with 411 Length Required.
+   */
+  private async send(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response> {
+    const signed = await new AwsV4Signer({ ...this.credentials, url, ...init }).sign();
+    return (this.fetchImpl ?? fetch)(signed.url.toString(), { method: signed.method, headers: signed.headers, body: init.body });
+  }
 
-  private async send(url: string, init: RequestInit): Promise<Response> {
-    const signed = await this.client.sign(url, init);
-    return (this.fetchImpl ?? fetch)(signed);
+  private async presign(url: URL, method: string): Promise<string> {
+    const signed = await new AwsV4Signer({ ...this.credentials, url: url.toString(), method, signQuery: true }).sign();
+    return signed.url.toString();
   }
 
   objectUrl(key: string): string {
@@ -65,8 +83,7 @@ export class ObjectStorage {
     url.searchParams.set("partNumber", String(partNumber));
     url.searchParams.set("uploadId", uploadId);
     url.searchParams.set("X-Amz-Expires", String(expiresSeconds));
-    const signed = await this.client.sign(new Request(url, { method: "PUT" }), { aws: { signQuery: true } });
-    return signed.url;
+    return this.presign(url, "PUT");
   }
 
   async completeMultipartUpload(key: string, uploadId: string, parts: { partNumber: number; etag: string }[]) {
@@ -141,8 +158,7 @@ export class ObjectStorage {
     const url = new URL(this.objectUrl(key));
     url.searchParams.set("X-Amz-Expires", String(expiresSeconds));
     url.searchParams.set("response-content-disposition", contentDisposition(fileName));
-    const signed = await this.client.sign(new Request(url, { method: "GET" }), { aws: { signQuery: true } });
-    return signed.url;
+    return this.presign(url, "GET");
   }
 }
 
