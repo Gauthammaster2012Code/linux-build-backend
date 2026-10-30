@@ -10,6 +10,6 @@
     "test": "pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "shellcheck": "shellcheck -x builder/*.sh builder/*/*.sh"
+    "shellcheck": "shellcheck -x builder/*.sh builder/*/*.sh scripts/*.sh"
   }
 }

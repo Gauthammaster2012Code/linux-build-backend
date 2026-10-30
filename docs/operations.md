@@ -19,6 +19,13 @@ Personal AI connections do not count toward the platform generation quota.
 
 Quotas and membership revocation look up a member's unfinished builds by status, so any number of newer finished builds cannot hide an older unfinished one.
 
+## Sign-in and membership
+
+- Accounts are email and password. Creating one needs a one-time invite code for that email; the Admin page shows the code once when the invitation is created. Lost codes cannot be recovered: invite the email again, which revokes the old code.
+- Invitations created before invite codes existed have no code and cannot be redeemed. Invite those people again.
+- A signed-in user without membership sees a form to enter a code. Five wrong codes lock that form for 15 minutes.
+- Revoked members stay revoked when they enter a new code; restore them from the Admin page instead.
+
 ## Sessions and AI selection
 
 - Every member request checks the Better Auth session behind the Convex token, not just the token. Signing out, revoking a session or session expiry ends access right away, even though the token itself is still unexpired.
@@ -74,6 +81,8 @@ Container images are built with `--platform linux/amd64`, and the build fails if
 
 ## Troubleshooting
 
+- **Something is not configured.** Run `npx convex run setup:verify`; each failing check says what is wrong without showing secret values.
+- **Everyone gets "Too many requests" on sign-in.** Better Auth could not find a single client IP and is using one shared bucket (look for its "could not determine a client IP" warning in the Convex logs). Set `advanced.ipAddress` in `convex/auth.ts` to match the headers your proxy sends.
 - **Builds stay queued.** Check the global active limit and the Admin "Operational errors" list for dispatch failures, such as a missing GitHub App installation or a wrong `GITHUB_WORKFLOW_REF`.
 - **Claim returns 401.** The OIDC claims do not match `GITHUB_REPOSITORY`, `GITHUB_WORKFLOW_FILE`/`GITHUB_WORKFLOW_REF`, the SHA allowlist or the audience.
 - **Boot tests time out.** Without `/dev/kvm`, QEMU falls back to software emulation and timeouts are tripled. Check the serial log lines in the build log.

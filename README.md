@@ -62,14 +62,14 @@ cd packages/backend
 CONVEX_AGENT_MODE=anonymous npx convex dev
 ```
 
-Then start the web app from the `linux-build-frontend` repository with `NEXT_PUBLIC_CONVEX_URL` and `NEXT_PUBLIC_CONVEX_SITE_URL` pointing at that deployment.
+Then start the web app from the `linux-build-frontend` repository with `NEXT_PUBLIC_CONVEX_URL` and `NEXT_PUBLIC_CONVEX_SITE_URL` pointing at that deployment. Set `SITE_URL` (for example `http://localhost:3000`) and `BETTER_AUTH_SECRET` on the local deployment, then create an invite code for yourself with `npx convex run admin:bootstrapAdmin '{"email":"you@example.com"}'` and create an account with it.
 
-GitHub sign-in, builds, AI generation and downloads need the external services in [docs/setup.md](docs/setup.md). Without them the app runs, but those features return clear "not configured" errors.
+Sign-in is email and password, invite-only (see [docs/setup.md](docs/setup.md#sign-in-and-invitations)). Builds, AI generation and downloads need the external services in [docs/setup.md](docs/setup.md). Without them the app runs, but those features return clear "not configured" errors. `npx convex run setup:verify` reports what is missing.
 
 ## Testing scope
 
 - `packages/spec`: schema, defaults, policy, log batch byte budget, verification rules and AI output evaluation, including deeply nested output (unit tests).
-- `packages/backend`: crypto, OIDC claim checks, GitHub helpers, multipart completion recovery and the generation loop (unit tests). The lifecycle, Better Auth session checks (with the registered Better Auth component), quotas, dedup, claims, events and log limits, uploads, finish and failure codes, cancel, reconciliation guards and provider selection use `convex-test`.
+- `packages/backend`: crypto, OIDC claim checks, GitHub helpers, multipart completion recovery, the generation loop and `setup:verify` with fake services (unit tests). Sign-up gating through the real Better Auth HTTP routes (missing, wrong, expired, revoked, reused and other-email codes), invite redemption and its attempt limit, sign-in rate limits, disabled routes, `bootstrapAdmin`, the lifecycle, Better Auth session checks (with the registered Better Auth component), quotas, dedup, claims, events and log limits, uploads, finish and failure codes, cancel, reconciliation guards and provider selection use `convex-test`.
 - `packages/runner`: workspace rendering, manifests, argument-safe exec, HTTP retries, sequenced reporting with heartbeats and byte-bounded batches, multipart upload and worker settlement, and the full pipeline with fake builders (success, boot failure, missing packages, build and upload failure, cancellation, a missing work root).
 - `builder/`: checked statically with shellcheck. Real ISO and container builds and the QEMU boot tests run only on a GitHub Actions runner; they need Docker, privileged containers and KVM.
 

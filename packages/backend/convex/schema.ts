@@ -66,13 +66,25 @@ export default defineSchema({
     email: v.string(),
     role: v.union(v.literal("member"), v.literal("admin")),
     status: v.union(v.literal("pending"), v.literal("accepted"), v.literal("revoked")),
+    /** SHA-256 of the normalized one-time code. Invitations created before codes existed have none and cannot be redeemed. */
+    codeHash: v.optional(v.string()),
     invitedBy: v.optional(v.id("profiles")),
     acceptedBy: v.optional(v.id("profiles")),
+    acceptedAt: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.number(),
   })
     .index("by_email", ["email"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_codeHash", ["codeHash"]),
+
+  authAttempts: defineTable({
+    key: v.string(),
+    windowStart: v.number(),
+    count: v.number(),
+  })
+    .index("by_key", ["key"])
+    .index("by_windowStart", ["windowStart"]),
 
   projects: defineTable({
     ownerId: v.id("profiles"),

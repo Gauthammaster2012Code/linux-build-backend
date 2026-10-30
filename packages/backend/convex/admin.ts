@@ -5,10 +5,16 @@ import { internalMutation, mutation, query } from "./_generated/server";
 import { appError, ERR, requireAdmin, requireMember } from "./lib/access";
 import { requestCancel, unfinishedBuilds } from "./lib/buildOps";
 import { DEFAULT_SETTINGS, MAX_BUILD_TIMEOUT_MINUTES } from "./lib/config";
+import { issueInvitation, normalizeEmail } from "./lib/invites";
 import { getSettings, getSettingsDoc } from "./lib/settings";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const INVITATION_TTL_MS = 14 * 24 * 60 * 60_000;
+
+function validEmail(email: string): string {
+  const normalized = normalizeEmail(email);
+  if (!EMAIL_PATTERN.test(normalized) || normalized.length > 254) throw appError("INVALID_EMAIL", "Enter a valid email address.");
+  return normalized;
+}
 
 export const listMembers = query({
   args: {},
@@ -45,26 +51,10 @@ export const listInvitations = query({
 
 export const createInvitation = mutation({
   args: { email: v.string(), role: v.union(v.literal("member"), v.literal("admin")) },
+  /** Returns the one-time code. Only its hash is stored, so it cannot be shown again. */
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx);
-    const email = args.email.trim().toLowerCase();
-    if (!EMAIL_PATTERN.test(email) || email.length > 254) throw appError("INVALID_EMAIL", "Enter a valid email address.");
-    const now = Date.now();
-    const existing = await ctx.db
-      .query("invitations")
-      .withIndex("by_email", (q) => q.eq("email", email))
-      .collect();
-    for (const inv of existing) if (inv.status === "pending") await ctx.db.patch(inv._id, { status: "revoked" });
-    const invitationId = await ctx.db.insert("invitations", {
-      email,
-      role: args.role,
-      status: "pending",
-      invitedBy: admin._id,
-      createdAt: now,
-      expiresAt: now + INVITATION_TTL_MS,
-    });
-    // A pending (signed-in but uninvited) profile with this email is activated on next sign-in via ensureProfile.
-    return { invitationId };
+    return issueInvitation(ctx, { email: validEmail(args.email), role: args.role, invitedBy: admin._id });
   },
 });
 
@@ -187,29 +177,11 @@ export const overview = query({
 });
 
 /**
- * Creates the first administrator. Run from the CLI:
+ * Creates an admin invitation and returns its one-time code. It never activates an existing account: the person signs
+ * up (or, if already signed up, enters the code) to become an administrator. Run from the CLI:
  *   npx convex run admin:bootstrapAdmin '{"email":"you@example.com"}'
  */
 export const bootstrapAdmin = internalMutation({
   args: { email: v.string() },
-  handler: async (ctx, { email }) => {
-    const normalized = email.trim().toLowerCase();
-    const now = Date.now();
-    const profile = await ctx.db
-      .query("profiles")
-      .withIndex("by_email", (q) => q.eq("email", normalized))
-      .first();
-    if (profile) {
-      await ctx.db.patch(profile._id, { role: "admin", status: "active", revokedAt: undefined });
-      return { activatedProfile: profile._id };
-    }
-    const invitationId = await ctx.db.insert("invitations", {
-      email: normalized,
-      role: "admin",
-      status: "pending",
-      createdAt: now,
-      expiresAt: now + INVITATION_TTL_MS,
-    });
-    return { invitationId };
-  },
+  handler: async (ctx, { email }) => issueInvitation(ctx, { email: validEmail(email), role: "admin" }),
 });

@@ -5,7 +5,7 @@ import { resolveSpecDefaults, type BuildSpec, type FinishRequest } from "@linxge
 import betterAuthTest from "@convex-dev/better-auth/test";
 import { api, components, internal } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
-import { syncProfile } from "../convex/profiles";
+import { issueInvitation } from "../convex/lib/invites";
 import schema from "../convex/schema";
 import { modules } from "../convex/test.setup";
 
@@ -26,23 +26,24 @@ function newTest(): T {
   return t;
 }
 
-/** Creates a Better Auth user with a live session, then signs in through the real ensureProfile path. */
-async function addMember(t: T, n: number, opts: { invite?: boolean; verified?: boolean; role?: "member" | "admin" } = {}) {
+/** Creates a Better Auth user with a live session, signs in through ensureProfile and redeems an invite code. */
+async function addMember(t: T, n: number, opts: { invite?: boolean; role?: "member" | "admin" } = {}) {
   const email = `user${n}@example.com`;
   const now = Date.now();
-  if (opts.invite !== false) {
-    await t.run((ctx) =>
-      ctx.db.insert("invitations", { email, role: opts.role ?? "member", status: "pending", createdAt: now, expiresAt: now + 1e9 }),
-    );
-  }
   const user = (await t.mutation(auth.adapter.create, {
-    input: { model: "user", data: { email, emailVerified: opts.verified ?? true, name: `User ${n}`, createdAt: now, updatedAt: now } },
+    input: { model: "user", data: { email, emailVerified: false, name: `User ${n}`, createdAt: now, updatedAt: now } },
   })) as { _id: string };
   const session = (await t.mutation(auth.adapter.create, {
     input: { model: "session", data: { userId: user._id, token: `token-${n}`, expiresAt: now + 1e9, createdAt: now, updatedAt: now } },
   })) as { _id: string };
   const as = t.withIdentity({ subject: user._id, sessionId: session._id });
-  const profile = await as.mutation(api.profiles.ensureProfile, {});
+  let profile = await as.mutation(api.profiles.ensureProfile, {});
+  if (opts.invite !== false) {
+    const { code } = await t.run((ctx) => issueInvitation(ctx, { email, role: opts.role ?? "member" }));
+    const accepted = await as.mutation(api.profiles.acceptInvitation, { code });
+    if (!accepted.ok) throw new Error(accepted.message);
+    profile = accepted.profile;
+  }
   return { as, profile, authUserId: user._id, sessionId: session._id };
 }
 
@@ -141,13 +142,6 @@ describe("membership", () => {
     await expect(as.mutation(api.generation.submit, { prompt: "x box", clientRequestId: "abcdefgh1" })).rejects.toThrow(/invite-only/);
   });
 
-  it("requires a verified email to accept an invitation", async () => {
-    const t = newTest();
-    const { profile, authUserId } = await addMember(t, 1, { verified: false });
-    expect(profile.status).toBe("pending");
-    const again = await t.run((ctx) => syncProfile(ctx, { authUserId, email: "user1@example.com", emailVerified: true, name: "U" }));
-    expect(again.status).toBe("active");
-  });
 
   it("blocks revoked members and cancels their unfinished builds", async () => {
     const t = newTest();

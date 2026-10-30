@@ -82,6 +82,11 @@ export class R2Storage {
     return { sizeBytes: Number(res.headers.get("content-length") ?? "0") };
   }
 
+  async putObject(key: string, body: string, contentType: string) {
+    const res = await this.client.fetch(this.objectUrl(key), { method: "PUT", headers: { "Content-Type": contentType }, body });
+    if (!res.ok) throw new StorageError(`PutObject failed with ${res.status}`);
+  }
+
   async deleteObject(key: string) {
     const res = await this.client.fetch(this.objectUrl(key), { method: "DELETE" });
     if (!res.ok && res.status !== 404) throw new StorageError(`DeleteObject failed with ${res.status}`);

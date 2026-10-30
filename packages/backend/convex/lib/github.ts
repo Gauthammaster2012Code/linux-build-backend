@@ -116,6 +116,29 @@ export async function installationToken(cfg: GitHubAppSettings, fetchImpl: Fetch
   return ((await res.json()) as { token: string }).token;
 }
 
+export interface RepositoryInfo {
+  fullName: string;
+  defaultBranch: string;
+}
+
+/** Returns null when the token cannot see the repository. */
+export async function getRepository(cfg: GitHubAppSettings, token: string, fetchImpl: FetchLike = fetch): Promise<RepositoryInfo | null> {
+  const res = await gh(fetchImpl, token, "GET", `/repos/${cfg.repository}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw await errorFrom(res, "Get repository");
+  const body = (await res.json()) as { full_name: string; default_branch: string };
+  return { fullName: body.full_name, defaultBranch: body.default_branch };
+}
+
+/** GitHub only lists workflows that exist on the default branch. Returns null when the workflow file is not there. */
+export async function getWorkflow(cfg: GitHubAppSettings, token: string, fetchImpl: FetchLike = fetch): Promise<{ state: string; path: string } | null> {
+  const res = await gh(fetchImpl, token, "GET", `/repos/${cfg.repository}/actions/workflows/${encodeURIComponent(cfg.workflowFile)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw await errorFrom(res, "Get workflow");
+  const body = (await res.json()) as { state: string; path: string };
+  return { state: body.state, path: body.path };
+}
+
 export function runNameFor(attemptId: string) {
   return `LinxGen attempt ${attemptId}`;
 }
