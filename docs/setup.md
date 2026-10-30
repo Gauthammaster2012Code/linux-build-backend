@@ -14,6 +14,7 @@ npx convex deploy            # or `npx convex dev` for a development deployment
 | Variable | Required | Purpose |
 |---|---|---|
 | `SITE_URL` | yes | Public URL of the web app, for example `https://linxgen.example.com`. Used as the Better Auth base URL and trusted origin. |
+| `OWNER_EMAIL` | yes | Email of the owner account, the only one that can create, list and revoke invite codes (Settings > Invitations in the web app). Other admins cannot demote or revoke it. Without it, invite codes can only be created from the CLI. |
 | `BETTER_AUTH_SECRET` | yes | Random secret for Better Auth sessions, at least 32 characters: `openssl rand -base64 32`. |
 | `CREDENTIAL_ENCRYPTION_KEYS` | yes | Keyring for personal AI keys: `{"current":"v1","keys":{"v1":"<base64 of 32 random bytes>"}}`. To rotate, add a new version, make it `current`, and keep the old one until every key has been re-saved. |
 | `PLATFORM_OLLAMA_API_KEY` | for platform AI | Ollama Cloud key for the platform default provider. |
@@ -39,7 +40,7 @@ npx convex deploy            # or `npx convex dev` for a development deployment
 
 `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` and the Cloudflare R2 variables (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) are no longer used. Remove them if an older deployment still has them. Files left in an old R2 bucket are not migrated; delete the bucket when you no longer need them.
 
-`scripts/configure-production.sh` asks for the values only the owner has (web app URL, GitHub App, Backblaze B2, the optional LinxGen Storage app, Ollama), saves them on the production deployment without showing or writing them anywhere, creates the first admin invite code and runs `setup:verify`. Set `LINXGEN_CONVEX_DEPLOYMENT` to target a deployment other than `gautham-r-krishna:linxgen:production`.
+`scripts/configure-production.sh` asks for the values only the owner has (web app URL, GitHub App, Backblaze B2, the optional LinxGen Storage app, Ollama, the owner email), saves them on the production deployment without showing or writing them anywhere, creates the owner's invite code and runs `setup:verify`. Set `LINXGEN_CONVEX_DEPLOYMENT` to target a deployment other than `gautham-r-krishna:linxgen:production`.
 
 ### Sign-in and invitations
 
@@ -48,21 +49,23 @@ People sign in with an email address and a password (12 to 128 characters). Linx
 - An invitation is bound to one email address and carries a one-time code such as `7K3D-QF9M-…` (140 random bits). Only a SHA-256 hash of the code is stored, so the code is shown once, when the invitation is created. Codes expire after 14 days. Inviting the same email again revokes the older code.
 - Creating an account needs the code. Better Auth refuses `/sign-up/email` unless the code belongs to a pending, unexpired invitation for that exact email. After sign-up the web app redeems the code, which activates membership with the invitation's role and marks the code used.
 - Someone who already has an account but no membership can enter a code after signing in.
-- Email addresses are not verified (there is no email sender). The code is the proof that an administrator invited that address.
+- Only the owner (`OWNER_EMAIL`) creates, lists and revokes invitations, on the web app's Settings page. Other admins manage members and limits but cannot issue codes.
+- Email addresses are not verified (there is no email sender). The code is the proof that the owner invited that address.
 - There is no password reset yet, and the reset, verification email, email change and social sign-in routes are switched off. If someone forgets their password, an operator has to delete their Better Auth `user`, `account` and `session` rows (Convex dashboard, `betterAuth` component) and send them a new invitation.
 
 Rate limits: Better Auth limits `/sign-in/email` to 5 requests a minute and `/sign-up/email` to 5 an hour per client IP, stored in the Better Auth `rateLimit` table. Each email address also gets at most 10 sign-in attempts per 15 minutes, and each user at most 5 invite code attempts per 15 minutes. If Better Auth cannot find a single client IP in `x-forwarded-for`, it logs a warning and all clients share one bucket per route, with looser limits (60 sign-ins a minute, 30 sign-ups an hour).
 
-### First administrator
+### Owner and first invite code
 
-Create the first admin invitation from the CLI. It returns the one-time code and never activates an existing account:
+Set `OWNER_EMAIL` to your email, then create your admin invitation from the CLI. It returns the one-time code and never activates an existing account:
 
 ```bash
+npx convex env set OWNER_EMAIL you@example.com
 npx convex run admin:bootstrapAdmin '{"email":"you@example.com"}'
 # { invitationId: "…", email: "you@example.com", role: "admin", code: "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX", expiresAt: … }
 ```
 
-Open the web app, choose **Create account**, and enter that email, a password and the code. If you already have an account, sign in and enter the code instead. Later members are invited from the Admin page, which shows each new code once.
+Open the web app, choose **Create account**, and enter that email, a password and the code. If you already have an account, sign in and enter the code instead. You then invite everyone else from **Settings > Invitations**, which shows each new code once.
 
 ### Check the configuration
 
@@ -72,7 +75,7 @@ npx convex run setup:verify
 
 This returns `{ "ok": boolean, "checks": [{ "name", "ok", "detail" }] }`. It never returns or logs secret values. It checks:
 
-- `env:*`: every required variable is set. `BETTER_AUTH_SECRET` and `RUNNER_CAPABILITY_SECRET` are at least 32 characters, `CREDENTIAL_ENCRYPTION_KEYS` parses and every key is 32 bytes, `SITE_URL` is an https origin, and `GITHUB_APP_PRIVATE_KEY` is a PEM key. `STORAGE_S3_ENDPOINT` is an https B2 endpoint with a region and `STORAGE_BUCKET` is a valid B2 bucket name. Leftover `GITHUB_CLIENT_*` and `R2_*` variables are listed as unused.
+- `env:*`: every required variable is set. `BETTER_AUTH_SECRET` and `RUNNER_CAPABILITY_SECRET` are at least 32 characters, `CREDENTIAL_ENCRYPTION_KEYS` parses and every key is 32 bytes, `SITE_URL` is an https origin, `OWNER_EMAIL` is an email address, and `GITHUB_APP_PRIVATE_KEY` is a PEM key. `STORAGE_S3_ENDPOINT` is an https B2 endpoint with a region and `STORAGE_BUCKET` is a valid B2 bucket name. Leftover `GITHUB_CLIENT_*` and `R2_*` variables are listed as unused.
 - `github:app`, `github:repository`, `github:workflow`: the app gets an installation token, the installation can see `GITHUB_REPOSITORY`, and `GITHUB_WORKFLOW_FILE` is active on the default branch. Before the workflow is pushed, `github:workflow` says it is "not on main yet". The app has no contents permission, so a `GITHUB_WORKFLOW_REF` other than the default branch is not checked.
 - `storage:bucket`: writes, reads back and deletes a 2-byte object under `_linxgen-probe/`, then lists its versions to confirm the key can delete every version.
 - `github-storage:app`: if any `STORAGE_GITHUB_APP_*` variable is set, all five are set, the app can be read with its private key, its slug matches, and it has Administration and Contents write and no other permissions. Not configured is reported as optional.
@@ -160,5 +163,5 @@ Each of these needs a yes from the project owner before anyone carries it out:
 - [ ] Optional: create the LinxGen Storage GitHub App (Administration and Contents write on members' repositories they choose to grant)
 - [ ] Choose runner labels (paid larger runners need separate approval)
 - [ ] Deploy the web app to Vercel
-- [ ] Run `admin:bootstrapAdmin` for the first administrator
+- [ ] Set `OWNER_EMAIL` and run `admin:bootstrapAdmin` for the owner
 - [ ] Run `setup:verify` (it writes and deletes a probe object in B2 and sends one tiny Ollama request)

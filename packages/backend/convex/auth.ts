@@ -100,7 +100,7 @@ export const createAuth = (ctx: GenericCtx<DataModel>) => {
             throw new APIError(
               "FORBIDDEN",
               result.reason === "expired"
-                ? { code: AUTH_ERROR.inviteExpired, message: "This invite code has expired. Ask an administrator for a new one." }
+                ? { code: AUTH_ERROR.inviteExpired, message: "This invite code has expired. Ask the owner for a new one." }
                 : { code: AUTH_ERROR.inviteInvalid, message: "This invite code is not valid for this email address." },
             );
           }

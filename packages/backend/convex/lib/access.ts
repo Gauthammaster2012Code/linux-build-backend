@@ -2,6 +2,8 @@ import { ConvexError } from "convex/values";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import { authComponent } from "../auth";
+import { ownerEmail } from "./config";
+import { normalizeEmail } from "./invites";
 
 export type ReaderCtx = QueryCtx | MutationCtx;
 
@@ -35,7 +37,7 @@ export async function requireMember(ctx: ReaderCtx): Promise<Doc<"profiles">> {
     .withIndex("by_authUserId", (q) => q.eq("authUserId", authUserId))
     .unique();
   if (!profile || profile.status !== "active") {
-    throw appError(ERR.notMember, "LinxGen is invite-only. Ask an administrator for an invitation.");
+    throw appError(ERR.notMember, "LinxGen is invite-only. Ask the owner for an invite code.");
   }
   return profile;
 }
@@ -43,6 +45,25 @@ export async function requireMember(ctx: ReaderCtx): Promise<Doc<"profiles">> {
 export async function requireAdmin(ctx: ReaderCtx): Promise<Doc<"profiles">> {
   const profile = await requireMember(ctx);
   if (profile.role !== "admin") throw appError(ERR.forbidden, "Administrator access is required.");
+  return profile;
+}
+
+/**
+ * The owner is named by OWNER_EMAIL on the deployment, so nobody can become the owner from inside the app. Matching on
+ * email is enough because sign-up needs an invite code for that exact address and the change-email route is off.
+ */
+export function isOwnerEmail(email: string): boolean {
+  const owner = ownerEmail();
+  return owner !== undefined && normalizeEmail(owner) === normalizeEmail(email);
+}
+
+export function isOwner(profile: Doc<"profiles">): boolean {
+  return profile.status === "active" && isOwnerEmail(profile.email);
+}
+
+export async function requireOwner(ctx: ReaderCtx): Promise<Doc<"profiles">> {
+  const profile = await requireMember(ctx);
+  if (!isOwnerEmail(profile.email)) throw appError(ERR.forbidden, "Only the LinxGen owner can manage invite codes.");
   return profile;
 }
 

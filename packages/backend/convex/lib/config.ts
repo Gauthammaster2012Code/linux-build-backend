@@ -15,6 +15,11 @@ function optional(name: string): string | undefined {
   return value ? value : undefined;
 }
 
+/** The email of the one account allowed to issue invite codes in the web app. */
+export function ownerEmail(): string | undefined {
+  return optional("OWNER_EMAIL");
+}
+
 function int(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;

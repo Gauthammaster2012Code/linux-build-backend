@@ -12,11 +12,12 @@ type T = ReturnType<typeof convexTest>;
 
 const SITE = "http://localhost:3000";
 const PASSWORD = "correct horse battery";
-const saved = { SITE_URL: process.env.SITE_URL, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET };
+const saved = { SITE_URL: process.env.SITE_URL, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET, OWNER_EMAIL: process.env.OWNER_EMAIL };
 
 beforeAll(() => {
   process.env.SITE_URL = SITE;
   process.env.BETTER_AUTH_SECRET = "test-secret-".padEnd(48, "x");
+  process.env.OWNER_EMAIL = "Owner@Example.com";
 });
 afterAll(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -97,18 +98,45 @@ describe("invite codes", () => {
     expect(stored[0]!.expiresAt - stored[0]!.createdAt).toBe(14 * 24 * 60 * 60_000);
   });
 
-  it("are created by admins only, and listing never exposes codes or hashes", async () => {
+  it("are created by the owner only, and listing never exposes codes or hashes", async () => {
     const t = newTest();
-    const admin = await existingUser(t, "admin@example.com", false);
-    await admin.mutation(api.profiles.ensureProfile, {});
-    const { code } = await t.mutation(internal.admin.bootstrapAdmin, { email: "admin@example.com" });
-    expect((await admin.mutation(api.profiles.acceptInvitation, { code })).ok).toBe(true);
-    const created = await admin.mutation(api.admin.createInvitation, { email: " New@Example.com ", role: "member" });
+    const owner = await existingUser(t, "owner@example.com", false);
+    await owner.mutation(api.profiles.ensureProfile, {});
+    const { code } = await t.mutation(internal.admin.bootstrapAdmin, { email: "owner@example.com" });
+    expect(await owner.mutation(api.profiles.acceptInvitation, { code })).toMatchObject({ ok: true, profile: { role: "admin", isOwner: true } });
+    const created = await owner.mutation(api.admin.createInvitation, { email: " New@Example.com ", role: "member" });
     expect(created).toMatchObject({ email: "new@example.com", role: "member" });
     expect(normalizeInviteCode(created.code)).not.toBeNull();
-    const listed = JSON.stringify(await admin.query(api.admin.listInvitations, {}));
+    const listed = JSON.stringify(await owner.query(api.admin.listInvitations, {}));
     expect(listed).not.toContain("codeHash");
     expect(listed).not.toContain(created.code);
+  });
+
+  it("cannot be managed by other admins, who also cannot demote or revoke the owner", async () => {
+    const t = newTest();
+    const owner = await existingUser(t, "owner@example.com", false);
+    await owner.mutation(api.profiles.ensureProfile, {});
+    const ownerCode = await t.mutation(internal.admin.bootstrapAdmin, { email: "owner@example.com" });
+    await owner.mutation(api.profiles.acceptInvitation, { code: ownerCode.code });
+    const admin = await existingUser(t, "admin@example.com", false);
+    await admin.mutation(api.profiles.ensureProfile, {});
+    const adminCode = await owner.mutation(api.admin.createInvitation, { email: "admin@example.com", role: "admin" });
+    expect(await admin.mutation(api.profiles.acceptInvitation, { code: adminCode.code })).toMatchObject({
+      ok: true,
+      profile: { role: "admin", isOwner: false },
+    });
+
+    await expect(admin.mutation(api.admin.createInvitation, { email: "x@example.com", role: "member" })).rejects.toThrow(/owner/);
+    await expect(admin.query(api.admin.listInvitations, {})).rejects.toThrow(/owner/);
+    const pending = await owner.mutation(api.admin.createInvitation, { email: "y@example.com", role: "member" });
+    await expect(admin.mutation(api.admin.revokeInvitation, { invitationId: pending.invitationId })).rejects.toThrow(/owner/);
+
+    const members = await admin.query(api.admin.listMembers, {});
+    expect(members.filter((m) => m.isOwner).map((m) => m.email)).toEqual(["owner@example.com"]);
+    const ownerId = members.find((m) => m.isOwner)!.profileId;
+    await expect(admin.mutation(api.admin.setRole, { profileId: ownerId, role: "member" })).rejects.toThrow(/owner/);
+    await expect(admin.mutation(api.admin.setMembership, { profileId: ownerId, status: "revoked" })).rejects.toThrow(/owner/);
+    expect(await owner.query(api.profiles.viewer, {})).toMatchObject({ status: "active", role: "admin", isOwner: true });
   });
 });
 
