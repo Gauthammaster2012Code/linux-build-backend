@@ -80,7 +80,7 @@ export const dashboard = query({
         platformGenerationsToday: generations,
         platformGenerationsPerDay: settings.platformGenerationsPerDay,
         buildMinutesLast7Days: buildMinutes,
-        artifactRetentionDays: settings.artifactRetentionDays,
+        artifactRetentionHours: settings.artifactRetentionHours,
       },
     };
   },

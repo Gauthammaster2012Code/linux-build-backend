@@ -1,9 +1,10 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ClaimResponse, EventsRequest, FinishRequest } from "@linxgen/spec";
+import { STORAGE_FULL_MESSAGE, type ClaimResponse, type EventsRequest, type FinishRequest } from "@linxgen/spec";
 import { describe, expect, it, vi } from "vitest";
 import type { Exec } from "../src/exec";
+import { ApiError } from "../src/http";
 import { overallFailure, runPipeline, type PipelineDeps } from "../src/pipeline";
 import type { uploadFile } from "../src/upload";
 import { LOCK, SPEC } from "./fixtures";
@@ -18,6 +19,7 @@ function setup(
     missingCurl?: boolean;
     freshWorkRoot?: boolean;
     failUploadKinds?: string[];
+    storageFull?: boolean;
   } = {},
 ) {
   const tmpRoot = mkdtempSync(path.join(tmpdir(), "linxgen-pipeline-"));
@@ -78,6 +80,7 @@ function setup(
   };
   let n = 0;
   const upload = vi.fn(async (_api, _file: string, meta: { kind: string; fileName: string }) => {
+    if (opts.storageFull && meta.kind !== "log") throw new ApiError(409, "storage_full", false);
     if (opts.failUploadKinds?.includes(meta.kind)) throw new Error("storage unavailable");
     return { uploadId: `${meta.kind}-${++n}`, sizeBytes: 3, sha256: "d".repeat(64) };
   }) as unknown as typeof uploadFile;
@@ -187,6 +190,15 @@ describe("runPipeline setup and failure codes", () => {
     expect(body.status).toBe("failed");
     expect(body.failure?.code).toBe("upload_failed");
     expect(body.outputs.every((o) => o.status === "failed" && o.error?.startsWith("Upload failed"))).toBe(true);
+  });
+
+  it("reports storage_full when temporary storage has no room for the outputs", async () => {
+    const t = setup({ storageFull: true });
+    await runPipeline(t.deps);
+    const body = t.finish.mock.calls[0]![0];
+    expect(body.status).toBe("failed");
+    expect(body.failure).toEqual({ code: "storage_full", message: STORAGE_FULL_MESSAGE });
+    expect(body.outputs.every((o) => o.status === "failed" && o.error === STORAGE_FULL_MESSAGE)).toBe(true);
   });
 
   it("keeps a partial result unclassified when one output is deliverable", async () => {

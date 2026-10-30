@@ -191,8 +191,13 @@ export type FinishRequest = z.infer<typeof finishRequestSchema>;
 
 export const finishResponseSchema = z.object({ buildStatus: z.string() });
 
-/** Part sizes for multipart uploads. R2 requires every part except the last to be the same size and at least 5 MiB. */
+/**
+ * Part size for multipart uploads. S3-compatible storage (Backblaze B2 included) needs every part except the last to be
+ * at least 5 MB and at most 5 GiB, with at most 10,000 parts, so one upload can hold up to 640 GiB.
+ */
 export const UPLOAD_PART_SIZE_BYTES = 64 * 1024 * 1024;
+export const MAX_UPLOAD_PARTS = 10_000;
+export const MAX_UPLOAD_BYTES = UPLOAD_PART_SIZE_BYTES * MAX_UPLOAD_PARTS;
 
 export function partCountFor(sizeBytes: number, partSize = UPLOAD_PART_SIZE_BYTES): number {
   return Math.max(1, Math.ceil(sizeBytes / partSize));

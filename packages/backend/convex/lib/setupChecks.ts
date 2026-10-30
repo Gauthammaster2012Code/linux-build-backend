@@ -1,8 +1,19 @@
-import { ConfigError, credentialKeyring, githubAppConfig, platformAi, r2Config, runnerSecret } from "./config";
+import {
+  ConfigError,
+  credentialKeyring,
+  githubAppConfig,
+  platformAi,
+  runnerSecret,
+  saveDispatchConfig,
+  STORAGE_APP_VARS,
+  storageAppConfig,
+  storageConfig,
+} from "./config";
 import { base64ToBytes } from "./crypto";
 import { getRepository, getWorkflow, GitHubError, installationToken } from "./github";
+import { getStorageApp } from "./githubStorage";
+import { ObjectStorage, StorageError } from "./objectStorage";
 import { ProviderError, testProviderConnection } from "./providers";
-import { R2Storage, StorageError } from "./r2";
 
 /** One line of the setup report. `detail` never contains secret values. */
 export interface SetupCheck {
@@ -20,13 +31,20 @@ const REQUIRED_VARS = [
   "GITHUB_APP_ID",
   "GITHUB_APP_INSTALLATION_ID",
   "GITHUB_APP_PRIVATE_KEY",
-  "R2_ACCOUNT_ID",
-  "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY",
-  "R2_BUCKET",
+  "STORAGE_S3_ENDPOINT",
+  "STORAGE_ACCESS_KEY_ID",
+  "STORAGE_SECRET_ACCESS_KEY",
+  "STORAGE_BUCKET",
 ] as const;
 
-const LEGACY_VARS = ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"] as const;
+const LEGACY_VARS: Record<string, string> = {
+  GITHUB_CLIENT_ID: "No longer used (sign-in is email and password). You can remove it.",
+  GITHUB_CLIENT_SECRET: "No longer used (sign-in is email and password). You can remove it.",
+  R2_ACCOUNT_ID: "No longer used (temporary storage moved to Backblaze B2). You can remove it.",
+  R2_ACCESS_KEY_ID: "No longer used (temporary storage moved to Backblaze B2). You can remove it.",
+  R2_SECRET_ACCESS_KEY: "No longer used (temporary storage moved to Backblaze B2). You can remove it.",
+  R2_BUCKET: "No longer used (temporary storage moved to Backblaze B2). You can remove it.",
+};
 
 const PROBE_PREFIX = "_linxgen-probe/";
 
@@ -52,6 +70,10 @@ function checkSiteUrl(value: string): SetupCheck {
   if (url.protocol !== "https:" && !local) return { name: "env:SITE_URL", ok: false, detail: "Must use https outside local development." };
   if (url.pathname !== "/" || url.search) return { name: "env:SITE_URL", ok: false, detail: "Must be an origin without a path, for example https://linxgen.example.com." };
   return { name: "env:SITE_URL", ok: true, detail: `Set to ${url.origin}.` };
+}
+
+function isPem(value: string): boolean {
+  return /-----BEGIN (RSA )?PRIVATE KEY-----/.test(value.replace(/\\n/g, "\n"));
 }
 
 function checkVariable(name: (typeof REQUIRED_VARS)[number]): SetupCheck {
@@ -82,9 +104,15 @@ function checkVariable(name: (typeof REQUIRED_VARS)[number]): SetupCheck {
       case "GITHUB_REPOSITORY":
         return /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(value) ? check(true, `Set to ${value}.`) : check(false, "Set, but not in owner/name form.");
       case "GITHUB_APP_PRIVATE_KEY":
-        return /-----BEGIN (RSA )?PRIVATE KEY-----/.test(value.replace(/\\n/g, "\n"))
-          ? check(true, "Set, PEM format.")
-          : check(false, "Set, but not a PEM private key.");
+        return isPem(value) ? check(true, "Set, PEM format.") : check(false, "Set, but not a PEM private key.");
+      case "STORAGE_S3_ENDPOINT": {
+        const cfg = storageConfig();
+        return check(true, `Set to ${cfg.endpoint} (region ${cfg.region}).`);
+      }
+      case "STORAGE_BUCKET":
+        return /^[a-z0-9][a-z0-9-]{4,48}[a-z0-9]$/i.test(value)
+          ? check(true, `Set to ${value}.`)
+          : check(false, "Set, but B2 bucket names are 6-50 letters, digits and hyphens.");
       default:
         return check(true, "Set.");
     }
@@ -143,23 +171,80 @@ async function checkGitHub(): Promise<SetupCheck[]> {
   return checks;
 }
 
-async function checkR2(): Promise<SetupCheck> {
-  let storage: R2Storage;
+async function checkStorage(): Promise<SetupCheck> {
+  let storage: ObjectStorage;
   try {
-    storage = new R2Storage(r2Config());
+    storage = new ObjectStorage(storageConfig());
   } catch (e) {
-    return { name: "r2:bucket", ok: false, detail: `Skipped: ${describe(e)}` };
+    return { name: "storage:bucket", ok: false, detail: `Skipped: ${describe(e)}` };
   }
   const key = `${PROBE_PREFIX}${crypto.randomUUID()}`;
   try {
     await storage.putObject(key, "ok", "text/plain");
     const head = await storage.headObject(key);
-    if (!head || head.sizeBytes !== 2) return { name: "r2:bucket", ok: false, detail: "The probe object was written but could not be read back." };
+    if (!head || head.sizeBytes !== 2) return { name: "storage:bucket", ok: false, detail: "The probe object was written but could not be read back." };
     await storage.deleteObject(key);
-    return { name: "r2:bucket", ok: true, detail: `Wrote, read and deleted a probe object under ${PROBE_PREFIX}.` };
+    const left = await storage.listVersions(key);
+    if (left.length > 0) {
+      return {
+        name: "storage:bucket",
+        ok: false,
+        detail: "The probe object could not be removed completely. The application key needs the deleteFiles capability (Read and Write access).",
+      };
+    }
+    return { name: "storage:bucket", ok: true, detail: `Wrote, read and permanently deleted a probe object under ${PROBE_PREFIX}.` };
   } catch (e) {
-    const hint = e instanceof StorageError && / (401|403)$/.test(e.message) ? " Check the R2 token and its bucket scope." : "";
-    return { name: "r2:bucket", ok: false, detail: `${describe(e)}.${hint}` };
+    const hint =
+      e instanceof StorageError && / (401|403)$/.test(e.message)
+        ? " Check the application key, that it is limited to this bucket, and that STORAGE_S3_ENDPOINT matches the bucket's region."
+        : "";
+    return { name: "storage:bucket", ok: false, detail: `${describe(e)}.${hint}` };
+  }
+}
+
+/** The optional "LinxGen Storage" app for saving builds to members' own GitHub accounts. */
+async function checkStorageApp(): Promise<SetupCheck[]> {
+  const set = STORAGE_APP_VARS.filter((name) => env(name));
+  if (set.length === 0) {
+    return [{ name: "github-storage:app", ok: true, detail: "Not configured (optional). Members cannot save builds to GitHub." }];
+  }
+  const missing = STORAGE_APP_VARS.filter((name) => !env(name));
+  if (missing.length > 0) return [{ name: "github-storage:app", ok: false, detail: `Partly configured; missing ${missing.join(", ")}.` }];
+  if (!isPem(env("STORAGE_GITHUB_APP_PRIVATE_KEY")!)) {
+    return [{ name: "github-storage:app", ok: false, detail: "STORAGE_GITHUB_APP_PRIVATE_KEY is not a PEM private key." }];
+  }
+  const checks: SetupCheck[] = [];
+  try {
+    const cfg = storageAppConfig();
+    const app = await getStorageApp(cfg);
+    const problems: string[] = [];
+    if (app.slug !== cfg.slug) problems.push(`STORAGE_GITHUB_APP_SLUG is ${cfg.slug} but the app's slug is ${app.slug}`);
+    if (app.permissions.administration !== "write") problems.push("Administration must be Read and write (to create the private repository)");
+    if (app.permissions.contents !== "write") problems.push("Contents must be Read and write (to upload release files)");
+    const extra = Object.keys(app.permissions).filter((p) => !["administration", "contents", "metadata"].includes(p));
+    if (extra.length > 0) problems.push(`remove permissions it does not need: ${extra.join(", ")}`);
+    checks.push(
+      problems.length > 0
+        ? { name: "github-storage:app", ok: false, detail: `${problems.join("; ")}.` }
+        : { name: "github-storage:app", ok: true, detail: `App ${app.slug} found with Administration and Contents write.` },
+    );
+  } catch (e) {
+    checks.push({ name: "github-storage:app", ok: false, detail: `Could not read the storage app: ${describe(e)}` });
+  }
+  checks.push(await checkSaveWorkflow());
+  return checks;
+}
+
+async function checkSaveWorkflow(): Promise<SetupCheck> {
+  try {
+    const cfg = saveDispatchConfig();
+    const token = await installationToken(cfg);
+    const workflow = await getWorkflow(cfg, token);
+    if (!workflow) return { name: "github:save-workflow", ok: false, detail: `.github/workflows/${cfg.workflowFile} is not on the default branch yet. Push it before saving builds.` };
+    if (workflow.state !== "active") return { name: "github:save-workflow", ok: false, detail: `${workflow.path} exists but is ${workflow.state}.` };
+    return { name: "github:save-workflow", ok: true, detail: `${workflow.path} is active.` };
+  } catch (e) {
+    return { name: "github:save-workflow", ok: false, detail: `Skipped: ${describe(e)}` };
   }
 }
 
@@ -177,13 +262,13 @@ async function checkOllama(): Promise<SetupCheck> {
   }
 }
 
-/** Checks configuration and external services. Safe to run repeatedly; the only write is an R2 probe object it deletes again. */
+/** Checks configuration and external services. Safe to run repeatedly; the only write is a storage probe object it deletes again. */
 export async function verifySetup(): Promise<{ ok: boolean; checks: SetupCheck[] }> {
   const checks: SetupCheck[] = REQUIRED_VARS.map(checkVariable);
-  for (const name of LEGACY_VARS) {
-    if (env(name)) checks.push({ name: `env:${name}`, ok: true, detail: "No longer used (sign-in is email and password). You can remove it." });
+  for (const [name, detail] of Object.entries(LEGACY_VARS)) {
+    if (env(name)) checks.push({ name: `env:${name}`, ok: true, detail });
   }
-  const [github, r2, ollama] = await Promise.all([checkGitHub(), checkR2(), checkOllama()]);
-  checks.push(...github, r2, ollama);
+  const [github, storage, storageApp, ollama] = await Promise.all([checkGitHub(), checkStorage(), checkStorageApp(), checkOllama()]);
+  checks.push(...github, storage, ...storageApp, ollama);
   return { ok: checks.every((c) => c.ok), checks };
 }

@@ -77,6 +77,7 @@ export const FAILURE_CODES = [
   "build_failed",
   "verification_failed",
   "upload_failed",
+  "storage_full",
   "partial_outputs",
   "timed_out",
   "cancelled",

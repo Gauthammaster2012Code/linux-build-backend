@@ -15,7 +15,9 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { appendEvent, failBuild, finishAttempt, recordOpsError, transitionBuild } from "./lib/buildOps";
 import { TIMING } from "./lib/config";
-import { getSettings } from "./lib/settings";
+import { maybeAutoSave } from "./lib/saves";
+import { getSettings, retentionMs } from "./lib/settings";
+import { fitsBudget, storageUsage } from "./lib/storageBudget";
 import { artifactKind } from "./schema";
 
 export const MAX_LOG_BATCHES_PER_ATTEMPT = 300;
@@ -202,6 +204,8 @@ export const capabilityContext = internalQuery({
       requestedOutputs: check.build.requestedOutputs,
       maxArtifactBytes: settings.maxArtifactBytes,
       maxLogBytes: settings.maxLogBytes,
+      maxStoredBytes: settings.maxStoredBytes,
+      storedBytes: (await storageUsage(ctx)).storedBytes,
     };
   },
 });
@@ -237,7 +241,7 @@ export const recordUploadStart = internalMutation({
     sha256: v.string(),
     contentType: v.string(),
     storageKey: v.string(),
-    r2UploadId: v.string(),
+    storageUploadId: v.string(),
     partSizeBytes: v.number(),
     partCount: v.number(),
   },
@@ -250,7 +254,10 @@ export const recordUploadStart = internalMutation({
         .withIndex("by_attempt_kind", (q) => q.eq("attemptId", check.attempt._id).eq("kind", args.kind))
         .collect()
     ).find((u) => u.fileName === args.fileName && u.status !== "aborted");
-    if (existing) return { ok: true as const, uploadId: existing._id, duplicateOf: args.r2UploadId };
+    if (existing) return { ok: true as const, uploadId: existing._id, duplicateOf: args.storageUploadId };
+    // Checked here, inside the serializable mutation, so concurrent uploads cannot overshoot the budget together.
+    const settings = await getSettings(ctx);
+    if (!fitsBudget((await storageUsage(ctx)).storedBytes, args.sizeBytes, settings.maxStoredBytes)) return reject(409, "storage_full");
     const { attemptId: _a, capabilityHash: _c, ...rest } = args;
     const uploadId = await ctx.db.insert("uploads", {
       ...rest,
@@ -300,7 +307,8 @@ export const completeUpload = internalMutation({
       // ISOs and containers become downloadable only after the finish report confirms verification.
       verified: false,
       status: "available",
-      expiresAt: now + settings.artifactRetentionDays * 24 * 60 * 60_000,
+      // Provisional; the finish report restarts the retention period when the build ends.
+      expiresAt: now + retentionMs(settings),
       createdAt: now,
     });
     await ctx.db.patch(upload._id, { status: "completed", completedAt: now, artifactId });
@@ -308,7 +316,14 @@ export const completeUpload = internalMutation({
   },
 });
 
-const RUNNER_FAILURE_CODES: FailureCode[] = ["unsupported_configuration", "build_failed", "verification_failed", "upload_failed", "timed_out"];
+const RUNNER_FAILURE_CODES: FailureCode[] = [
+  "unsupported_configuration",
+  "build_failed",
+  "verification_failed",
+  "upload_failed",
+  "storage_full",
+  "timed_out",
+];
 
 export const finish = internalMutation({
   args: { attemptId: v.string(), capabilityHash: v.string(), body: v.any() },
@@ -336,6 +351,12 @@ export const finish = internalMutation({
       const u = uploads.get(uploadId);
       return u && u.kind === kind && u.status === "completed" ? u.artifactId : undefined;
     };
+
+    // Files are kept for the retention period counted from when the build finishes, not from when each upload ended.
+    const keepUntil = now + retentionMs(await getSettings(ctx));
+    for (const u of uploads.values()) {
+      if (u.status === "completed" && u.artifactId) await ctx.db.patch(u.artifactId, { expiresAt: keepUntil });
+    }
 
     const results: Doc<"builds">["outputResults"] = [];
     for (const output of build.requestedOutputs) {
@@ -421,6 +442,7 @@ export const finish = internalMutation({
       await finishAttempt(ctx, attempt._id, "failed", { code, message });
       build = await failBuild(ctx, build._id, code, message.slice(0, 2000));
     }
+    await maybeAutoSave(ctx, build);
     return { ok: true as const, buildStatus: build.status, duplicate: false };
   },
 });

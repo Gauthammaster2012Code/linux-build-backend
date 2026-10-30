@@ -106,7 +106,7 @@ async function startRunning(t: T, buildId: Id<"builds">, cap = "cap-hash-1", run
   return attemptId;
 }
 
-async function upload(t: T, attemptId: Id<"attempts">, cap: string, kind: "iso" | "container" | "log", size = 100) {
+async function upload(t: T, attemptId: Id<"attempts">, cap: string, kind: "iso" | "container" | "log" | "manifest", size = 100) {
   const start = await t.mutation(internal.runner.recordUploadStart, {
     attemptId,
     capabilityHash: cap,
@@ -116,7 +116,7 @@ async function upload(t: T, attemptId: Id<"attempts">, cap: string, kind: "iso" 
     sha256: "f".repeat(64),
     contentType: "application/gzip",
     storageKey: `k/${kind}`,
-    r2UploadId: `r2-${kind}`,
+    storageUploadId: `up-${kind}`,
     partSizeBytes: 64,
     partCount: 2,
   });
@@ -163,12 +163,57 @@ describe("membership", () => {
       buildTimeoutMinutes: 331,
       maxArtifactBytes: 1024,
       maxLogBytes: 1024,
-      artifactRetentionDays: 7,
+      artifactRetentionHours: 24,
+      maxStoredBytes: 4096,
       platformGenerationsPerDay: 20,
     };
     await expect(admin.as.mutation(api.admin.updateSettings, settings)).rejects.toThrow(/cannot exceed 330/);
     await admin.as.mutation(api.admin.updateSettings, { ...settings, buildTimeoutMinutes: 330 });
     expect((await admin.as.query(api.admin.getLimits, {})).buildTimeoutMinutes).toBe(330);
+  });
+
+  it("validates file retention in hours and the storage budget", async () => {
+    const t = newTest();
+    const admin = await addMember(t, 1, { role: "admin" });
+    const settings = {
+      maxActiveBuildsPerUser: 1,
+      maxActiveBuildsGlobal: 2,
+      maxPendingBuildsPerUser: 3,
+      buildTimeoutMinutes: 120,
+      maxArtifactBytes: 1024,
+      maxLogBytes: 1024,
+      artifactRetentionHours: 24,
+      maxStoredBytes: 4096,
+      platformGenerationsPerDay: 20,
+    };
+    for (const hours of [0, 169, 1.5]) {
+      await expect(admin.as.mutation(api.admin.updateSettings, { ...settings, artifactRetentionHours: hours })).rejects.toThrow(/between 1 and 168 hours|positive integer/);
+    }
+    await expect(admin.as.mutation(api.admin.updateSettings, { ...settings, maxStoredBytes: 1000 })).rejects.toThrow(/storage budget/);
+    await admin.as.mutation(api.admin.updateSettings, { ...settings, artifactRetentionHours: 168 });
+    expect(await admin.as.query(api.admin.getLimits, {})).toMatchObject({ artifactRetentionHours: 168, maxStoredBytes: 4096 });
+    const overview = await admin.as.query(api.admin.overview, {});
+    expect(overview.storage).toEqual({ storedBytes: 0, maxStoredBytes: 4096, files: 0 });
+  });
+
+  it("reads settings saved with day-based retention using the hour default", async () => {
+    const t = newTest();
+    const admin = await addMember(t, 1, { role: "admin" });
+    await t.run((ctx) =>
+      ctx.db.insert("settings", {
+        key: "global",
+        maxActiveBuildsPerUser: 1,
+        maxActiveBuildsGlobal: 2,
+        maxPendingBuildsPerUser: 3,
+        buildTimeoutMinutes: 120,
+        maxArtifactBytes: 1024,
+        maxLogBytes: 1024,
+        artifactRetentionDays: 7,
+        platformGenerationsPerDay: 20,
+        updatedAt: 0,
+      }),
+    );
+    expect(await admin.as.query(api.admin.getLimits, {})).toMatchObject({ artifactRetentionHours: 24, maxStoredBytes: 9 * 1024 ** 3 });
   });
 
   it("restricts admin functions", async () => {
@@ -650,5 +695,488 @@ describe("reconciliation guards", () => {
     const build = (await t.run((ctx) => ctx.db.get(buildId)))!;
     expect(build.currentAttemptId).toBe(second);
     expect(build.status).not.toBe("timed_out");
+  });
+});
+
+const STORAGE_APP_ENV = {
+  STORAGE_GITHUB_APP_ID: "789",
+  STORAGE_GITHUB_APP_SLUG: "linxgen-storage",
+  STORAGE_GITHUB_APP_CLIENT_ID: "Iv1.clientid",
+  STORAGE_GITHUB_APP_CLIENT_SECRET: "client-secret-value",
+  STORAGE_GITHUB_APP_PRIVATE_KEY: "",
+};
+
+async function withStorageApp() {
+  if (!STORAGE_APP_ENV.STORAGE_GITHUB_APP_PRIVATE_KEY) {
+    const { generateKeyPairSync } = await import("node:crypto");
+    STORAGE_APP_ENV.STORAGE_GITHUB_APP_PRIVATE_KEY = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs1", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    }).privateKey;
+  }
+  Object.assign(process.env, STORAGE_APP_ENV);
+}
+
+function withoutStorageApp() {
+  for (const k of Object.keys(STORAGE_APP_ENV)) delete process.env[k];
+}
+
+async function connectGitHub(t: T, profileId: Id<"profiles">, opts: { autoSave?: boolean } = {}) {
+  return t.run((ctx) =>
+    ctx.db.insert("githubConnections", {
+      profileId,
+      githubUserId: 42,
+      login: "octo",
+      installationId: 3,
+      repoId: 7,
+      repoOwner: "octo",
+      repoName: "storage",
+      repoUrl: "https://github.com/octo/storage",
+      autoSave: opts.autoSave ?? false,
+      status: "connected",
+      connectedAt: Date.now(),
+      updatedAt: Date.now(),
+    }),
+  );
+}
+
+/** Runs a build to success with a verified ISO and container, their manifests and a log. */
+async function succeededBuild(t: T, as: ReturnType<T["withIdentity"]>, cap = "cap") {
+  const buildId = await submitAccepted(t, as);
+  const attemptId = await startRunning(t, buildId, cap, `run-${cap}`);
+  await t.mutation(internal.runner.recordEvents, { attemptId, capabilityHash: cap, seq: 0, stage: "uploading", events: [], logLines: [] });
+  const iso = await upload(t, attemptId, cap, "iso");
+  const ctr = await upload(t, attemptId, cap, "container");
+  const manifest = await upload(t, attemptId, cap, "manifest");
+  const log = await upload(t, attemptId, cap, "log");
+  const result = await t.mutation(internal.runner.finish, {
+    attemptId,
+    capabilityHash: cap,
+    body: {
+      ...finishBody([
+        { output: "iso", status: "verified", artifactUploadId: iso, manifestUploadId: manifest, verification: passIso, installedPackageCount: 1, requestedPackages: [] },
+        { output: "container", status: "verified", artifactUploadId: ctr, verification: passContainer, installedPackageCount: 1, requestedPackages: [] },
+      ]),
+      logUploadId: log,
+    },
+  });
+  expect(result).toMatchObject({ buildStatus: "succeeded" });
+  return { buildId, attemptId };
+}
+
+async function claimSave(t: T, saveId: Id<"saves">, cap = "save-cap", runId = "9001") {
+  await t.mutation(internal.saves.tick, {});
+  const save = (await t.run((ctx) => ctx.db.get(saveId)))!;
+  const saveAttemptId = save.currentAttemptId!;
+  const claim = await t.mutation(internal.saves.claimAttempt, {
+    saveAttemptId,
+    runId,
+    runAttempt: 1,
+    workflowSha: "b".repeat(40),
+    capabilityHash: cap,
+  });
+  return { saveAttemptId, claim };
+}
+
+describe("temporary storage budget and retention", () => {
+  it("refuses uploads that would exceed the storage budget", async () => {
+    const t = newTest();
+    const { as } = await addMember(t, 1);
+    await t.run((ctx) =>
+      ctx.db.insert("settings", {
+        key: "global",
+        maxActiveBuildsPerUser: 1,
+        maxActiveBuildsGlobal: 2,
+        maxPendingBuildsPerUser: 3,
+        buildTimeoutMinutes: 120,
+        maxArtifactBytes: 100,
+        maxLogBytes: 100,
+        artifactRetentionHours: 24,
+        maxStoredBytes: 150,
+        platformGenerationsPerDay: 20,
+        updatedAt: 0,
+      }),
+    );
+    const buildId = await submitAccepted(t, as);
+    const attemptId = await startRunning(t, buildId, "cap");
+    await upload(t, attemptId, "cap", "iso");
+    const refused = await t.mutation(internal.runner.recordUploadStart, {
+      attemptId,
+      capabilityHash: "cap",
+      kind: "container",
+      fileName: "out-container.bin",
+      sizeBytes: 100,
+      sha256: "f".repeat(64),
+      contentType: "application/gzip",
+      storageKey: "k/container",
+      storageUploadId: "up-container",
+      partSizeBytes: 64,
+      partCount: 2,
+    });
+    expect(refused).toEqual({ ok: false, status: 409, error: "storage_full" });
+    const context = await t.query(internal.runner.capabilityContext, { attemptId, capabilityHash: "cap" });
+    expect(context).toMatchObject({ ok: true, storedBytes: 100, maxStoredBytes: 150 });
+
+    await t.mutation(internal.runner.recordEvents, { attemptId, capabilityHash: "cap", seq: 0, stage: "uploading", events: [], logLines: [] });
+    await t.mutation(internal.runner.finish, {
+      attemptId,
+      capabilityHash: "cap",
+      body: {
+        ...finishBody([{ output: "container", status: "failed", verification: passContainer, installedPackageCount: 1, requestedPackages: [], error: "storage full" }], "failed"),
+        failure: { code: "storage_full", message: "Temporary storage is full; try again after older builds expire." },
+      },
+    });
+    expect((await as.query(api.builds.get, { buildId })).failure).toEqual({
+      code: "storage_full",
+      message: "Temporary storage is full; try again after older builds expire.",
+    });
+  });
+
+  it("keeps files for the retention period counted from when the build finished", async () => {
+    const t = newTest();
+    const { as } = await addMember(t, 1);
+    const buildId = await submitAccepted(t, as);
+    const attemptId = await startRunning(t, buildId, "cap");
+    await t.mutation(internal.runner.recordEvents, { attemptId, capabilityHash: "cap", seq: 0, stage: "uploading", events: [], logLines: [] });
+    const iso = await upload(t, attemptId, "cap", "iso");
+    const ctr = await upload(t, attemptId, "cap", "container");
+    vi.setSystemTime(Date.now() + 90 * 60_000);
+    const finishedAt = Date.now();
+    await t.mutation(internal.runner.finish, {
+      attemptId,
+      capabilityHash: "cap",
+      body: finishBody([
+        { output: "iso", status: "verified", artifactUploadId: iso, verification: passIso, installedPackageCount: 1, requestedPackages: [] },
+        { output: "container", status: "verified", artifactUploadId: ctr, verification: passContainer, installedPackageCount: 1, requestedPackages: [] },
+      ]),
+    });
+    const view = await as.query(api.builds.get, { buildId });
+    expect(view.artifacts.map((a) => a.expiresAt)).toEqual([finishedAt + 24 * 3600_000, finishedAt + 24 * 3600_000]);
+    expect((await as.query(api.builds.dashboard, {})).usage.artifactRetentionHours).toBe(24);
+  });
+
+  it("holds expired files while a save is active, for at most six hours", async () => {
+    await withStorageApp();
+    try {
+      const t = newTest();
+      const { as, profile } = await addMember(t, 1);
+      await connectGitHub(t, profile.profileId as Id<"profiles">);
+      const { buildId } = await succeededBuild(t, as);
+      await as.mutation(api.saves.request, { buildId });
+      const expiresAt = Math.max(...(await as.query(api.builds.get, { buildId })).artifacts.map((a) => a.expiresAt));
+      vi.setSystemTime(expiresAt + 1);
+      const held = await t.query(internal.maintenance.cleanupCandidates, {});
+      // The ISO, container and ISO manifest are part of the save; only the log may go.
+      expect(held.held).toBe(3);
+      expect(held.expired).toHaveLength(1);
+      vi.setSystemTime(expiresAt + 6 * 3600_000 + 1);
+      const released = await t.query(internal.maintenance.cleanupCandidates, {});
+      expect(released).toMatchObject({ held: 0 });
+      expect(released.expired).toHaveLength(4);
+    } finally {
+      withoutStorageApp();
+    }
+  });
+});
+
+describe("saving builds to GitHub", () => {
+  beforeEach(async () => {
+    await withStorageApp();
+  });
+  afterEach(() => {
+    withoutStorageApp();
+    vi.unstubAllGlobals();
+  });
+
+  it("is unavailable when the storage app is not configured", async () => {
+    withoutStorageApp();
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    expect((await as.query(api.githubStorage.status, {})).configured).toBe(false);
+    await expect(as.mutation(api.saves.request, { buildId })).rejects.toThrow(/not set up/);
+  });
+
+  it("requires a connection and verified outputs", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    const { buildId } = await succeededBuild(t, as);
+    await expect(as.mutation(api.saves.request, { buildId })).rejects.toThrow(/GitHub is not connected/);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const timedOut = await submitAccepted(t, as);
+    await startRunning(t, timedOut, "cap2", "run-2");
+    await timeOut(t, timedOut);
+    await expect(as.mutation(api.saves.request, { buildId: timedOut })).rejects.toThrow(/verified outputs/);
+    const other = await addMember(t, 2);
+    await expect(other.as.mutation(api.saves.request, { buildId })).rejects.toThrow(/not found/);
+  });
+
+  it("runs a save from the queue to a release in the member's repository", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    expect(await as.mutation(api.saves.request, { buildId })).toEqual({ saveId, existing: true });
+
+    const { saveAttemptId, claim } = await claimSave(t, saveId);
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("claim failed");
+    expect(claim.files.map((f) => f.kind)).toEqual(["iso", "manifest", "container"]);
+    expect(claim.connection).toEqual({ installationId: 3, repoId: 7, repoOwner: "octo", repoName: "storage" });
+    expect(claim.release).toMatchObject({ owner: "octo", repo: "storage", tag: `linxgen-${buildId}` });
+    expect(claim.release.body).toContain(claim.release.marker);
+    // A second runner for the same attempt is refused.
+    const rival = await t.mutation(internal.saves.claimAttempt, { saveAttemptId, runId: "9002", runAttempt: 1, workflowSha: "b".repeat(40), capabilityHash: "x" });
+    expect(rival).toMatchObject({ ok: false, error: "stale_attempt" });
+
+    const progress = (seq: number) =>
+      t.mutation(internal.saves.recordProgress, {
+        saveAttemptId,
+        capabilityHash: "save-cap",
+        body: { seq, phase: "uploading", doneBytes: 100, totalBytes: 300 },
+      });
+    expect(await progress(0)).toEqual({ ok: true, cancelRequested: false });
+    expect((await as.query(api.saves.forBuild, { buildId })).saves[0]).toMatchObject({
+      status: "running",
+      progress: { phase: "uploading", doneBytes: 100, totalBytes: 300 },
+    });
+
+    const releaseUrl = `https://github.com/octo/storage/releases/tag/linxgen-${buildId}`;
+    const done = await t.mutation(internal.saves.finish, {
+      saveAttemptId,
+      capabilityHash: "save-cap",
+      body: { status: "succeeded", releaseUrl, assetCount: 4 },
+    });
+    expect(done).toMatchObject({ ok: true, saveStatus: "succeeded" });
+    const view = await as.query(api.saves.forBuild, { buildId });
+    expect(view.saves[0]).toMatchObject({ status: "succeeded", releaseUrl, assetCount: 4 });
+    expect(await progress(1)).toMatchObject({ ok: false, error: "attempt_finished" });
+  });
+
+  it("ignores release links outside the member's repository", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    const { saveAttemptId } = await claimSave(t, saveId);
+    await t.mutation(internal.saves.finish, {
+      saveAttemptId,
+      capabilityHash: "save-cap",
+      body: { status: "succeeded", releaseUrl: "https://evil.example/releases/x", assetCount: 1 },
+    });
+    const [save] = (await as.query(api.saves.forBuild, { buildId })).saves;
+    expect(save?.status).toBe("succeeded");
+    expect(save?.releaseUrl).toBeUndefined();
+  });
+
+  it("does not accept build capabilities on save routes or save capabilities on build routes", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId, attemptId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    const { saveAttemptId } = await claimSave(t, saveId, "cap");
+    const asSave = await t.mutation(internal.saves.recordProgress, {
+      saveAttemptId: attemptId,
+      capabilityHash: "cap",
+      body: { seq: 0, phase: "downloading", doneBytes: 0, totalBytes: 1 },
+    });
+    expect(asSave).toMatchObject({ ok: false, status: 401 });
+    const asBuild = await t.mutation(internal.runner.recordEvents, { attemptId: saveAttemptId, capabilityHash: "cap", seq: 0, events: [], logLines: [] });
+    expect(asBuild).toMatchObject({ ok: false, status: 401 });
+  });
+
+  it("runs one save per member at a time", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const first = await succeededBuild(t, as, "c1");
+    const second = await succeededBuild(t, as, "c2");
+    const a = await as.mutation(api.saves.request, { buildId: first.buildId });
+    const b = await as.mutation(api.saves.request, { buildId: second.buildId });
+    await t.mutation(internal.saves.tick, {});
+    const statuses = await t.run(async (ctx) => [(await ctx.db.get(a.saveId))!.status, (await ctx.db.get(b.saveId))!.status]);
+    expect(statuses).toEqual(["dispatched", "queued"]);
+  });
+
+  it("retries a lost save runner once, then fails", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    const lose = async (saveAttemptId: Id<"saveAttempts">) => {
+      const a = (await t.run((ctx) => ctx.db.get(saveAttemptId)))!;
+      return t.mutation(internal.saves.markLostIfUnchanged, {
+        saveAttemptId,
+        observedStatus: a.status,
+        observedLivenessAt: a.lastHeartbeatAt ?? a.claimedAt ?? a.createdAt,
+        reason: "The save runner stopped responding.",
+      });
+    };
+    const first = await claimSave(t, saveId, "c1", "1");
+    expect(await lose(first.saveAttemptId)).toBe(true);
+    expect((await t.run((ctx) => ctx.db.get(saveId)))!.status).toBe("queued");
+    const second = await claimSave(t, saveId, "c2", "2");
+    expect(second.claim.ok).toBe(true);
+    expect(await lose(second.saveAttemptId)).toBe(true);
+    expect((await as.query(api.saves.forBuild, { buildId })).saves[0]).toMatchObject({ status: "failed", failure: { code: "runner_lost" } });
+    const { saveId: retried } = await as.mutation(api.saves.retry, { saveId });
+    expect(retried).not.toBe(saveId);
+  });
+
+  it("fails the save and asks to reconnect when GitHub refuses access", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    const { saveAttemptId } = await claimSave(t, saveId);
+    await t.mutation(internal.saves.finish, {
+      saveAttemptId,
+      capabilityHash: "save-cap",
+      body: { status: "failed", failure: { code: "github_unauthorized", message: "GitHub returned 401" } },
+    });
+    expect((await as.query(api.githubStorage.status, {})).connection).toMatchObject({ status: "broken" });
+    await expect(as.mutation(api.saves.request, { buildId })).rejects.toThrow(/Reconnect GitHub/);
+  });
+
+  it("fails cleanly when the files already left temporary storage", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    const { saveId } = await as.mutation(api.saves.request, { buildId });
+    const save = (await t.run((ctx) => ctx.db.get(saveId)))!;
+    await t.mutation(internal.maintenance.markArtifactExpired, { artifactId: save.artifactIds[0]! });
+    const { claim } = await claimSave(t, saveId);
+    expect(claim).toMatchObject({ ok: false, error: "storage_expired" });
+    expect((await as.query(api.saves.forBuild, { buildId })).saves[0]).toMatchObject({ status: "failed", failure: { code: "storage_expired" } });
+  });
+
+  it("saves automatically when the member turned it on", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">, { autoSave: true });
+    const { buildId } = await succeededBuild(t, as);
+    expect((await as.query(api.saves.forBuild, { buildId })).saves).toMatchObject([{ status: "queued", trigger: "auto" }]);
+  });
+
+  it("cancels queued saves and keeps no link after disconnecting", async () => {
+    const t = newTest();
+    const { as, profile } = await addMember(t, 1);
+    await connectGitHub(t, profile.profileId as Id<"profiles">);
+    const { buildId } = await succeededBuild(t, as);
+    await as.mutation(api.saves.request, { buildId });
+    await as.mutation(api.githubStorage.disconnect, {});
+    expect((await as.query(api.githubStorage.status, {})).connection).toBeNull();
+    expect((await as.query(api.saves.forBuild, { buildId })).saves[0]).toMatchObject({ status: "failed", failure: { code: "not_connected" } });
+  });
+});
+
+describe("connecting GitHub storage", () => {
+  beforeEach(async () => {
+    await withStorageApp();
+  });
+  afterEach(() => {
+    withoutStorageApp();
+    vi.unstubAllGlobals();
+  });
+
+  async function stateFrom(as: ReturnType<T["withIdentity"]>) {
+    const started = await as.mutation(api.githubStorage.startConnect, {});
+    if (!started.ok) throw new Error(started.message);
+    const install = new URL(started.installUrl);
+    expect(install.origin + install.pathname).toBe("https://github.com/apps/linxgen-storage/installations/new");
+    const authorize = new URL(started.authorizeUrl);
+    expect(authorize.searchParams.get("client_id")).toBe("Iv1.clientid");
+    expect(authorize.searchParams.get("state")).toBe(install.searchParams.get("state"));
+    return install.searchParams.get("state")!;
+  }
+
+  it("binds the state to one member, one use and ten minutes", async () => {
+    const t = newTest();
+    const a = await addMember(t, 1);
+    const b = await addMember(t, 2);
+    const { sha256Hex } = await import("../convex/lib/crypto");
+    const state = await stateFrom(a.as);
+    const stateHash = await sha256Hex(state);
+    expect(await t.mutation(internal.githubStorage.consumeState, { stateHash, profileId: b.profile.profileId as Id<"profiles"> })).toBe(false);
+    expect(await t.mutation(internal.githubStorage.consumeState, { stateHash, profileId: a.profile.profileId as Id<"profiles"> })).toBe(true);
+    expect(await t.mutation(internal.githubStorage.consumeState, { stateHash, profileId: a.profile.profileId as Id<"profiles"> })).toBe(false);
+    const late = await sha256Hex(await stateFrom(a.as));
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    expect(await t.mutation(internal.githubStorage.consumeState, { stateHash: late, profileId: a.profile.profileId as Id<"profiles"> })).toBe(false);
+  });
+
+  it("connects with the member's own installation and creates the private repository", async () => {
+    const t = newTest();
+    const { as } = await addMember(t, 1);
+    const state = await stateFrom(as);
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(req.url);
+        calls.push(`${req.method} ${url.host}${url.pathname}`);
+        if (url.host === "github.com" && url.pathname === "/login/oauth/access_token") {
+          expect(await req.json()).toMatchObject({ client_id: "Iv1.clientid", client_secret: "client-secret-value", code: "code-123" });
+          return Response.json({ access_token: "ghu_usertoken", token_type: "bearer" });
+        }
+        if (url.pathname === "/user") return Response.json({ id: 42, login: "octo", type: "User" });
+        if (url.pathname === "/user/installations") {
+          return Response.json({
+            installations: [{ id: 3, app_id: 789, target_type: "User", account: { id: 42, login: "octo" }, repository_selection: "all", suspended_at: null }],
+          });
+        }
+        if (url.pathname === "/repos/octo/storage" && req.method === "GET") return Response.json({ message: "Not Found" }, { status: 404 });
+        if (url.pathname === "/user/repos") {
+          return Response.json(
+            { id: 7, name: "storage", full_name: "octo/storage", html_url: "https://github.com/octo/storage", private: true, topics: [], owner: { login: "octo", id: 42 } },
+            { status: 201 },
+          );
+        }
+        if (url.pathname === "/repos/octo/storage/topics") return Response.json({ names: ["linxgen-storage"] });
+        if (url.pathname === "/app/installations/3/access_tokens") return Response.json({ token: "ghs_x", expires_at: "2030-01-01T00:00:00Z" }, { status: 201 });
+        throw new Error(`unexpected ${req.method} ${req.url}`);
+      }),
+    );
+    const result = await as.action(api.githubStorage.completeConnect, { code: "code-123", state });
+    expect(result).toMatchObject({ ok: true, login: "octo", repoFullName: "octo/storage", created: true });
+    expect(calls).toContain("POST api.github.com/user/repos");
+    const status = await as.query(api.githubStorage.status, {});
+    expect(status.connection).toMatchObject({ login: "octo", repoFullName: "octo/storage", status: "connected", autoSave: false });
+    expect(JSON.stringify(status)).not.toMatch(/ghu_|ghs_|installation/i);
+    const reused = await as.action(api.githubStorage.completeConnect, { code: "code-123", state });
+    expect(reused).toMatchObject({ ok: false, code: "invalid_state" });
+    await as.mutation(api.githubStorage.setAutoSave, { enabled: true });
+    expect((await as.query(api.githubStorage.status, {})).connection?.autoSave).toBe(true);
+  });
+
+  it("refuses when the app is only installed on an organization", async () => {
+    const t = newTest();
+    const { as } = await addMember(t, 1);
+    const state = await stateFrom(as);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL((input instanceof Request ? input : new Request(input, init)).url);
+        if (url.pathname === "/login/oauth/access_token") return Response.json({ access_token: "ghu_usertoken" });
+        if (url.pathname === "/user") return Response.json({ id: 42, login: "octo", type: "User" });
+        if (url.pathname === "/user/installations") {
+          return Response.json({
+            installations: [{ id: 5, app_id: 789, target_type: "Organization", account: { id: 77, login: "org" }, repository_selection: "all", suspended_at: null }],
+          });
+        }
+        throw new Error(`unexpected ${url}`);
+      }),
+    );
+    expect(await as.action(api.githubStorage.completeConnect, { code: "code-123", state })).toMatchObject({ ok: false, code: "not_installed" });
+    expect((await as.query(api.githubStorage.status, {})).connection).toBeNull();
   });
 });

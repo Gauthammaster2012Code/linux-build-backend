@@ -96,6 +96,11 @@ export function dispatchNonce(secret: string, attemptId: string): Promise<string
   return hmacSha256Base64Url(secret, `dispatch:v1:${attemptId}`);
 }
 
+/** Nonce for a save attempt. The distinct prefix keeps it from ever matching a build attempt's nonce. */
+export function saveDispatchNonce(secret: string, saveAttemptId: string): Promise<string> {
+  return hmacSha256Base64Url(secret, `save-dispatch:v1:${saveAttemptId}`);
+}
+
 export function capabilityToken(attemptId: string): string {
   return `${attemptId}.${randomToken(32)}`;
 }

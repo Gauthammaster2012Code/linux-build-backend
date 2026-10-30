@@ -1,6 +1,6 @@
 # LinxGen v2
 
-Describe a Linux system in plain language. LinxGen turns the description into a validated build spec with a hosted AI model, builds it on a clean GitHub Actions runner, boot-tests it, and stores verified artifacts in private Cloudflare R2 storage. Users download them through short-lived signed links.
+Describe a Linux system in plain language. LinxGen turns the description into a validated build spec with a hosted AI model, builds it on a clean GitHub Actions runner, boot-tests it, and keeps verified artifacts for 24 hours in private Backblaze B2 storage. Users download them through short-lived signed links, or save them to a private repository in their own GitHub account with the optional LinxGen Storage app.
 
 There are no clarification questions and no approval step. One prompt starts a build.
 
@@ -29,8 +29,9 @@ Not supported: installers or partitioning, Secure Boot, non-x86_64 architectures
    - Ubuntu ISO: `debootstrap` rootfs, Casper, SquashFS and GRUB (BIOS + UEFI), assembled by `grub-mkrescue`/xorriso inside the pinned `ubuntu:24.04` image.
    - Container: a fixed Dockerfile template on the pinned base image, then `docker save | gzip`.
 6. **Verify.** Each ISO boots in QEMU under SeaBIOS and under OVMF (UEFI). It must print `LINXGEN-BOOT-OK` on the serial console; for XFCE the display manager must also be active. Each container archive is loaded fresh and smoke-tested with networking disabled. Every requested package must be present in the installed manifest.
-7. **Upload.** Only verified ISO and container files are uploaded, through presigned multipart URLs straight to R2. Manifests and the full log are uploaded too. The backend checks the stored size before it records an artifact.
-8. **Finish.** The build becomes `succeeded` only if every requested output is verified. Partial results are reported as `partial_outputs`. An explicit runner failure, such as a timeout during the final uploads, takes precedence even if every image was verified. Artifacts expire after 7 days.
+7. **Upload.** Only verified ISO and container files are uploaded, through presigned multipart URLs straight to B2, as long as temporary storage stays under its limit (otherwise the build fails with `storage_full`). Manifests and the full log are uploaded too. The backend checks the stored size before it records an artifact.
+8. **Finish.** The build becomes `succeeded` only if every requested output is verified. Partial results are reported as `partial_outputs`. An explicit runner failure, such as a timeout during the final uploads, takes precedence even if every image was verified. Artifacts expire 24 hours after the build finishes.
+9. **Save (optional).** A member who connected GitHub can save a finished build, or turn on automatic saving. `.github/workflows/linxgen-save.yml` downloads the files, checks their SHA-256 and uploads them as release assets to the member's private storage repository, splitting files of 1.9 GiB or more into parts.
 
 Cancellation, runner loss, dispatch uncertainty, timeouts and cleanup are handled by Convex cron jobs (`convex/crons.ts`, `convex/maintenance.ts`, `convex/orchestrator.ts`).
 
@@ -38,10 +39,10 @@ Cancellation, runner loss, dispatch uncertainty, timeouts and cleanup are handle
 
 ```
 packages/spec       Shared build spec schema, defaults, capabilities, lifecycle, runner protocol
-packages/backend    Convex backend: auth, invitations, AI pipeline, orchestration, runner HTTP API, R2
+packages/backend    Convex backend: auth, invitations, AI pipeline, orchestration, runner HTTP API, B2 storage, GitHub saves
 packages/runner     Runner client used inside GitHub Actions (bundled with esbuild)
 builder/            Build, verification and toolchain scripts (bash, shellchecked)
-.github/workflows   linxgen-build.yml (runner) and ci.yml (checks on pull requests)
+.github/workflows   linxgen-build.yml (build runner), linxgen-save.yml (save runner) and ci.yml (checks)
 docs/               Setup, configuration and operations
 ```
 
@@ -69,8 +70,8 @@ Sign-in is email and password, invite-only (see [docs/setup.md](docs/setup.md#si
 ## Testing scope
 
 - `packages/spec`: schema, defaults, policy, log batch byte budget, verification rules and AI output evaluation, including deeply nested output (unit tests).
-- `packages/backend`: crypto, OIDC claim checks, GitHub helpers, multipart completion recovery, the generation loop and `setup:verify` with fake services (unit tests). Sign-up gating through the real Better Auth HTTP routes (missing, wrong, expired, revoked, reused and other-email codes), invite redemption and its attempt limit, sign-in rate limits, disabled routes, `bootstrapAdmin`, the lifecycle, Better Auth session checks (with the registered Better Auth component), quotas, dedup, claims, events and log limits, uploads, finish and failure codes, cancel, reconciliation guards and provider selection use `convex-test`.
-- `packages/runner`: workspace rendering, manifests, argument-safe exec, HTTP retries, sequenced reporting with heartbeats and byte-bounded batches, multipart upload and worker settlement, and the full pipeline with fake builders (success, boot failure, missing packages, build and upload failure, cancellation, a missing work root).
+- `packages/backend`: crypto, OIDC claim checks, GitHub helpers, B2 signing and multipart completion recovery, storage budget, save scheduling and release text, the storage app's repository checks, the generation loop and `setup:verify` with fake services (unit tests). Sign-up gating through the real Better Auth HTTP routes (missing, wrong, expired, revoked, reused and other-email codes), invite redemption and its attempt limit, sign-in rate limits, disabled routes, `bootstrapAdmin`, the lifecycle, Better Auth session checks (with the registered Better Auth component), quotas, dedup, claims, events and log limits, uploads, finish and failure codes, cancel, reconciliation guards, provider selection, settings bounds, retention and save holds, GitHub connect and the save lifecycle use `convex-test`.
+- `packages/runner`: workspace rendering, manifests, argument-safe exec, HTTP retries, sequenced reporting with heartbeats and byte-bounded batches, multipart upload and worker settlement, the full pipeline with fake builders (success, boot failure, missing packages, build and upload failure, full storage, cancellation, a missing work root), and the save job against fake storage and GitHub (split parts, `SHA256SUMS`, checksum mismatch, expired URLs, token refresh, release reuse and refusal of foreign releases, partial asset cleanup, cancellation, log masking).
 - `builder/`: checked statically with shellcheck. Real ISO and container builds and the QEMU boot tests run only on a GitHub Actions runner; they need Docker, privileged containers and KVM.
 
 ## Further reading

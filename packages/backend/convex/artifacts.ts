@@ -3,8 +3,8 @@ import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { action, internalQuery, query } from "./_generated/server";
 import { appError, ERR, requireMember } from "./lib/access";
-import { r2Config, TIMING } from "./lib/config";
-import { R2Storage } from "./lib/r2";
+import { storageConfig, TIMING } from "./lib/config";
+import { ObjectStorage } from "./lib/objectStorage";
 
 export const library = query({
   args: { paginationOpts: paginationOptsValidator },
@@ -53,12 +53,12 @@ export const getForDownload = internalQuery({
   },
 });
 
-/** Returns a short-lived signed URL after the ownership check. File bytes go directly from R2 to the browser. */
+/** Returns a short-lived signed URL after the ownership check. File bytes go directly from temporary storage (Backblaze B2) to the browser. */
 export const downloadUrl = action({
   args: { artifactId: v.id("artifacts") },
   handler: async (ctx, { artifactId }): Promise<{ url: string; expiresAt: number }> => {
     const a = await ctx.runQuery(internal.artifacts.getForDownload, { artifactId });
-    const storage = new R2Storage(r2Config());
+    const storage = new ObjectStorage(storageConfig());
     const url = await storage.presignDownload(a.storageKey, a.fileName, TIMING.presignedDownloadSeconds);
     return { url, expiresAt: Date.now() + TIMING.presignedDownloadSeconds * 1000 };
   },

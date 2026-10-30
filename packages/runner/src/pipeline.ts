@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   getDistroInfo,
   STATUS_LABELS,
+  STORAGE_FULL_MESSAGE,
   type ClaimResponse,
   type FinishRequest,
   type OutputResult,
@@ -14,6 +15,7 @@ import type { RunnerApiClient } from "./api";
 import type { RunnerEnv, ToolchainLock } from "./config";
 import type { Exec } from "./exec";
 import { buildManifest, checkRequestedPackages, parseDpkgManifest } from "./manifest";
+import { ApiError } from "./http";
 import { Reporter } from "./reporter";
 import { uploadFile, type UploadedFile } from "./upload";
 import { artifactFileName, renderWorkspace, writeWorkspace } from "./workspace";
@@ -52,6 +54,8 @@ interface OutputState {
   manifest?: UploadedFile;
   error?: string;
   uploadFailed?: boolean;
+  /** The backend refused the upload because temporary storage is at its budget. */
+  storageFull?: boolean;
 }
 
 const digestOf = (image: string) => image.slice(image.indexOf("@") + 1);
@@ -242,7 +246,8 @@ export async function runPipeline(deps: PipelineDeps): Promise<PipelineResult> {
         if (state.artifact) reporter.event("info", `Uploaded ${state.output} (${state.artifact.sizeBytes} bytes, sha256 ${state.artifact.sha256})`, state.output);
       } catch (e) {
         if (controller.signal.aborted) throw new AbortedError(abortReason ?? "aborted");
-        state.error = `Upload failed: ${(e as Error).message}`;
+        state.storageFull = e instanceof ApiError && e.code === "storage_full";
+        state.error = state.storageFull ? STORAGE_FULL_MESSAGE : `Upload failed: ${(e as Error).message}`;
         state.uploadFailed = true;
         reporter.event("error", state.error, state.output);
       }
@@ -306,8 +311,11 @@ export async function runPipeline(deps: PipelineDeps): Promise<PipelineResult> {
 }
 
 /** With no deliverable output the attempt failed; the code says whether uploading or verification was to blame. */
-export function overallFailure(states: Pick<OutputState, "built" | "artifact" | "error" | "uploadFailed">[]): FinishRequest["failure"] {
+export function overallFailure(
+  states: Pick<OutputState, "built" | "artifact" | "error" | "uploadFailed" | "storageFull">[],
+): FinishRequest["failure"] {
   if (states.some((s) => s.artifact && !s.error)) return undefined;
+  if (states.some((s) => s.storageFull)) return { code: "storage_full", message: STORAGE_FULL_MESSAGE };
   const message = states.map((s) => s.error).filter(Boolean).join(" ").slice(0, 4000) || "No output passed verification.";
   if (states.some((s) => s.built && s.uploadFailed)) return { code: "upload_failed", message };
   return { code: "verification_failed", message };

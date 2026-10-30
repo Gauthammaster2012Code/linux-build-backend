@@ -1,12 +1,13 @@
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { ACTIVE_RUNNER_STATUSES } from "@linxgen/spec";
+import { ACTIVE_RUNNER_STATUSES, MAX_ARTIFACT_RETENTION_HOURS, MIN_ARTIFACT_RETENTION_HOURS, validRetentionHours } from "@linxgen/spec";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { appError, ERR, requireAdmin, requireMember } from "./lib/access";
 import { requestCancel, unfinishedBuilds } from "./lib/buildOps";
 import { DEFAULT_SETTINGS, MAX_BUILD_TIMEOUT_MINUTES } from "./lib/config";
 import { issueInvitation, normalizeEmail } from "./lib/invites";
 import { getSettings, getSettingsDoc } from "./lib/settings";
+import { storageUsage } from "./lib/storageBudget";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -109,7 +110,8 @@ const settingsArgs = {
   buildTimeoutMinutes: v.number(),
   maxArtifactBytes: v.number(),
   maxLogBytes: v.number(),
-  artifactRetentionDays: v.number(),
+  artifactRetentionHours: v.number(),
+  maxStoredBytes: v.number(),
   platformGenerationsPerDay: v.number(),
 };
 
@@ -128,8 +130,17 @@ export const updateSettings = mutation({
         `The build timeout cannot exceed ${MAX_BUILD_TIMEOUT_MINUTES} minutes; the build workflow allows 360 minutes including setup and reporting.`,
       );
     }
+    if (!validRetentionHours(args.artifactRetentionHours)) {
+      throw appError(
+        "INVALID_SETTING",
+        `File retention must be between ${MIN_ARTIFACT_RETENTION_HOURS} and ${MAX_ARTIFACT_RETENTION_HOURS} hours.`,
+      );
+    }
+    if (args.maxStoredBytes < args.maxArtifactBytes) {
+      throw appError("INVALID_SETTING", "The storage budget must be at least the maximum artifact size, or no image could be uploaded.");
+    }
     const existing = await getSettingsDoc(ctx);
-    const doc = { ...args, updatedAt: Date.now(), updatedBy: admin._id };
+    const doc = { ...args, artifactRetentionDays: undefined, updatedAt: Date.now(), updatedBy: admin._id };
     if (existing) await ctx.db.patch(existing._id, doc);
     else await ctx.db.insert("settings", { key: "global", ...doc });
   },
@@ -172,7 +183,20 @@ export const overview = query({
         .withIndex("by_resolved_at", (q) => q.eq("resolvedAt", undefined))
         .take(200)
     ).length;
-    return { active, queued, unresolvedErrors, settings, defaults: DEFAULT_SETTINGS };
+    const storage = await storageUsage(ctx);
+    let activeSaves = 0;
+    for (const s of ["queued", "dispatched", "running"] as const) {
+      activeSaves += (await ctx.db.query("saves").withIndex("by_status", (q) => q.eq("status", s)).take(200)).length;
+    }
+    return {
+      active,
+      queued,
+      unresolvedErrors,
+      settings,
+      defaults: DEFAULT_SETTINGS,
+      storage: { storedBytes: storage.storedBytes, maxStoredBytes: settings.maxStoredBytes, files: storage.files },
+      activeSaves,
+    };
   },
 });
 

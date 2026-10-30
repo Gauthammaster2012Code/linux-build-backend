@@ -47,6 +47,37 @@ export function readRunnerEnv(env: NodeJS.ProcessEnv = process.env): RunnerEnv {
   };
 }
 
+export interface SaveEnv {
+  apiUrl: string;
+  saveAttemptId: string;
+  dispatchNonce: string;
+  audience: string;
+  oidcRequestUrl: string;
+  oidcRequestToken: string;
+  workRoot: string;
+}
+
+/** True when the job was started by the save workflow rather than the build workflow. */
+export function isSaveMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.LINXGEN_SAVE_ATTEMPT_ID);
+}
+
+export function readSaveEnv(env: NodeJS.ProcessEnv = process.env): SaveEnv {
+  const apiUrl = need(env, "LINXGEN_API_URL").replace(/\/+$/, "");
+  if (!/^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(apiUrl)) throw new ConfigurationError("LINXGEN_API_URL must be an https origin");
+  const saveAttemptId = need(env, "LINXGEN_SAVE_ATTEMPT_ID");
+  if (!/^[A-Za-z0-9]{1,64}$/.test(saveAttemptId)) throw new ConfigurationError("LINXGEN_SAVE_ATTEMPT_ID is malformed");
+  return {
+    apiUrl,
+    saveAttemptId,
+    dispatchNonce: need(env, "LINXGEN_DISPATCH_NONCE"),
+    audience: env.LINXGEN_OIDC_AUDIENCE || "linxgen-runner",
+    oidcRequestUrl: need(env, "ACTIONS_ID_TOKEN_REQUEST_URL"),
+    oidcRequestToken: need(env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+    workRoot: path.join(env.LINXGEN_WORK_ROOT || need(env, "RUNNER_TEMP"), "linxgen-save"),
+  };
+}
+
 export function readToolchainLock(builderDir: string): ToolchainLock {
   const lock = JSON.parse(readFileSync(path.join(builderDir, "toolchain.lock.json"), "utf8")) as ToolchainLock;
   for (const [key, image] of Object.entries(lock.images)) {

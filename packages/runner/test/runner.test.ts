@@ -262,7 +262,7 @@ describe("uploadFile", () => {
     const api = {
       uploadStart: vi.fn(async () => ({ uploadId: "up1", partSizeBytes: 10, partCount: 3 })),
       uploadParts: vi.fn(async (_id: string, nums: number[]) => ({
-        urls: nums.map((n) => ({ partNumber: n, url: `https://r2.test/part/${n}` })),
+        urls: nums.map((n) => ({ partNumber: n, url: `https://storage.test/part/${n}` })),
         expiresAt: 0,
       })),
       uploadComplete: complete,
@@ -291,7 +291,7 @@ describe("uploadFile", () => {
     const api = {
       uploadStart: vi.fn(async () => ({ uploadId: "up1", partSizeBytes: 10, partCount: 5 })),
       uploadParts: vi.fn(async (_id: string, nums: number[]) => ({
-        urls: nums.map((n) => ({ partNumber: n, url: `https://r2.test/part/${n}` })),
+        urls: nums.map((n) => ({ partNumber: n, url: `https://storage.test/part/${n}` })),
         expiresAt: 0,
       })),
       uploadComplete: vi.fn(),

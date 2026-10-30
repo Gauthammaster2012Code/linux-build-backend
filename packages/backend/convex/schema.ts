@@ -1,6 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
-import { ATTEMPT_STATUSES, BUILD_STATUSES, PROVIDER_KINDS } from "@linxgen/spec";
+import { ATTEMPT_STATUSES, BUILD_STATUSES, PROVIDER_KINDS, SAVE_FAILURE_CODES, SAVE_PHASES, SAVE_STATUSES } from "@linxgen/spec";
 
 const literals = <T extends readonly string[]>(values: T) =>
   v.union(...values.map((s) => v.literal(s))) as unknown as ReturnType<typeof v.literal<T[number]>>;
@@ -8,6 +8,8 @@ const literals = <T extends readonly string[]>(values: T) =>
 export const buildStatus = literals(BUILD_STATUSES);
 export const attemptStatus = literals(ATTEMPT_STATUSES);
 export const providerKind = literals(PROVIDER_KINDS);
+export const saveStatus = literals(SAVE_STATUSES);
+export const saveFailureCode = literals(SAVE_FAILURE_CODES);
 export const outputType = v.union(v.literal("iso"), v.literal("container"));
 export const artifactKind = v.union(v.literal("iso"), v.literal("container"), v.literal("log"), v.literal("manifest"));
 
@@ -223,7 +225,9 @@ export default defineSchema({
     sha256: v.string(),
     contentType: v.string(),
     storageKey: v.string(),
-    r2UploadId: v.string(),
+    /** Multipart upload id in temporary storage. Rows written before the move to Backblaze B2 carry `r2UploadId` instead. */
+    storageUploadId: v.optional(v.string()),
+    r2UploadId: v.optional(v.string()),
     partSizeBytes: v.number(),
     partCount: v.number(),
     status: v.union(v.literal("uploading"), v.literal("completed"), v.literal("aborted")),
@@ -292,7 +296,12 @@ export default defineSchema({
     buildTimeoutMinutes: v.number(),
     maxArtifactBytes: v.number(),
     maxLogBytes: v.number(),
-    artifactRetentionDays: v.number(),
+    /** Hours a build's files stay in temporary storage. Missing on rows saved before retention moved from days to hours. */
+    artifactRetentionHours: v.optional(v.number()),
+    /** Upload budget for temporary storage; uploads that would exceed it are refused. */
+    maxStoredBytes: v.optional(v.number()),
+    /** Superseded by artifactRetentionHours; kept so existing settings rows stay valid. */
+    artifactRetentionDays: v.optional(v.number()),
     platformGenerationsPerDay: v.number(),
     updatedAt: v.number(),
     updatedBy: v.optional(v.id("profiles")),
@@ -307,14 +316,100 @@ export default defineSchema({
       v.literal("generation"),
       v.literal("runner"),
       v.literal("storage"),
+      v.literal("save"),
     ),
     message: v.string(),
     buildId: v.optional(v.id("builds")),
     attemptId: v.optional(v.id("attempts")),
+    saveId: v.optional(v.id("saves")),
     resolvedAt: v.optional(v.number()),
   })
     .index("by_at", ["at"])
     .index("by_resolved_at", ["resolvedAt", "at"]),
+
+  /**
+   * A member's link to their own GitHub account through the separate "LinxGen Storage" GitHub App. No GitHub token is
+   * stored: the backend mints a short-lived installation token, limited to the storage repository, for each save.
+   */
+  githubConnections: defineTable({
+    profileId: v.id("profiles"),
+    githubUserId: v.number(),
+    login: v.string(),
+    installationId: v.number(),
+    repoId: v.number(),
+    repoOwner: v.string(),
+    repoName: v.string(),
+    repoUrl: v.string(),
+    autoSave: v.boolean(),
+    status: v.union(v.literal("connected"), v.literal("broken")),
+    brokenReason: v.optional(v.string()),
+    connectedAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_profile", ["profileId"]),
+
+  /** One-time OAuth `state` values. Only the SHA-256 is stored. */
+  githubConnectStates: defineTable({
+    stateHash: v.string(),
+    profileId: v.id("profiles"),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    usedAt: v.optional(v.number()),
+  })
+    .index("by_stateHash", ["stateHash"])
+    .index("by_expires", ["expiresAt"]),
+
+  /** Copies of a build's verified files to the member's GitHub storage repository, as release assets. */
+  saves: defineTable({
+    ownerId: v.id("profiles"),
+    buildId: v.id("builds"),
+    trigger: v.union(v.literal("manual"), v.literal("auto")),
+    status: saveStatus,
+    statusChangedAt: v.number(),
+    artifactIds: v.array(v.id("artifacts")),
+    totalBytes: v.number(),
+    repoFullName: v.string(),
+    releaseTag: v.string(),
+    releaseUrl: v.optional(v.string()),
+    assetCount: v.optional(v.number()),
+    progress: v.optional(
+      v.object({ phase: literals(SAVE_PHASES), doneBytes: v.number(), totalBytes: v.number(), message: v.optional(v.string()), at: v.number() }),
+    ),
+    failure: v.optional(v.object({ code: saveFailureCode, message: v.string() })),
+    attemptCount: v.number(),
+    currentAttemptId: v.optional(v.id("saveAttempts")),
+    cancelRequestedAt: v.optional(v.number()),
+    retryOfSaveId: v.optional(v.id("saves")),
+    queuedAt: v.number(),
+    startedAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_build", ["buildId", "createdAt"])
+    .index("by_owner_status", ["ownerId", "status"])
+    .index("by_status", ["status", "queuedAt"]),
+
+  saveAttempts: defineTable({
+    saveId: v.id("saves"),
+    ownerId: v.id("profiles"),
+    number: v.number(),
+    status: attemptStatus,
+    capabilityHash: v.optional(v.string()),
+    capabilityExpiresAt: v.optional(v.number()),
+    workflowRunId: v.optional(v.string()),
+    workflowRunAttempt: v.optional(v.number()),
+    workflowSha: v.optional(v.string()),
+    lastProgressSeq: v.number(),
+    lastHeartbeatAt: v.optional(v.number()),
+    lastGithubCheckAt: v.optional(v.number()),
+    dispatchedAt: v.optional(v.number()),
+    claimedAt: v.optional(v.number()),
+    deadlineAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
+    failure: v.optional(failure),
+    createdAt: v.number(),
+  })
+    .index("by_save", ["saveId", "number"])
+    .index("by_status", ["status", "createdAt"]),
 
   packageCache: defineTable({
     distroKey: v.string(),

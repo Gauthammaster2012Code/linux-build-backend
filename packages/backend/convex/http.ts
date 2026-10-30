@@ -1,6 +1,10 @@
 import { httpRouter } from "convex/server";
 import {
   claimRequestSchema,
+  saveClaimRequestSchema,
+  saveFinishRequestSchema,
+  saveProgressRequestSchema,
+  SAVE_PROTOCOL_VERSION,
   eventsRequestSchema,
   finishRequestSchema,
   partCountFor,
@@ -13,10 +17,14 @@ import type { z } from "zod";
 import { internal } from "./_generated/api";
 import { httpAction, type ActionCtx } from "./_generated/server";
 import { authComponent, createAuth } from "./auth";
-import { ConfigError, r2Config, runnerSecret, runnerTrustConfig, TIMING } from "./lib/config";
-import { capabilityToken, constantTimeEqual, dispatchNonce, parseCapabilityToken, sha256Hex } from "./lib/crypto";
+import type { Id } from "./_generated/dataModel";
+import { ConfigError, runnerSecret, runnerTrustConfig, storageAppConfig, storageConfig, TIMING } from "./lib/config";
+import { capabilityToken, constantTimeEqual, dispatchNonce, parseCapabilityToken, saveDispatchNonce, sha256Hex } from "./lib/crypto";
+import { GitHubError } from "./lib/github";
+import { storageRepoToken, storageTokenFailure } from "./lib/githubStorage";
+import { completeOrRecoverUpload, ObjectStorage, StorageError, storageKeyFor } from "./lib/objectStorage";
 import { RunnerAuthError, verifyRunnerOidcToken } from "./lib/oidc";
-import { completeOrRecoverUpload, R2Storage, StorageError, storageKeyFor } from "./lib/r2";
+import { fitsBudget } from "./lib/storageBudget";
 
 const http = httpRouter();
 authComponent.registerRoutes(http, createAuth);
@@ -84,6 +92,10 @@ function route(handler: (ctx: ActionCtx, req: Request) => Promise<Response>) {
         console.error("storage error", e.message);
         return json(502, { error: "storage_error" });
       }
+      if (e instanceof GitHubError) {
+        console.error("GitHub error", e.message);
+        return json(502, { error: "github_error" });
+      }
       console.error("runner endpoint failed", e);
       return json(500, { error: "internal_error" });
     }
@@ -96,7 +108,7 @@ http.route({
   handler: route(async (ctx, req) => {
     const token = bearer(req);
     const body = await readBody(req, claimRequestSchema, 16 * 1024);
-    const identity = await verifyRunnerOidcToken(token, runnerTrustConfig());
+    const identity = await verifyRunnerOidcToken(token, runnerTrustConfig("build"));
     const expected = await dispatchNonce(runnerSecret(), body.attemptId);
     if (!constantTimeEqual(expected, body.dispatchNonce)) throw new HttpError(401, "unauthorized");
     const cap = capabilityToken(body.attemptId);
@@ -150,20 +162,25 @@ http.route({
       if (existing.sha256 !== body.sha256 || existing.sizeBytes !== body.sizeBytes) throw new HttpError(409, "upload_conflict");
       return json(200, { uploadId: existing._id, partSizeBytes: existing.partSizeBytes, partCount: existing.partCount });
     }
-    const storage = new R2Storage(r2Config());
+    // Cheap early refusal; recordUploadStart repeats the check atomically.
+    if (!fitsBudget(context.storedBytes, body.sizeBytes, context.maxStoredBytes)) throw new HttpError(409, "storage_full");
+    const storage = new ObjectStorage(storageConfig());
     const storageKey = storageKeyFor(context.buildId, context.attemptId, body.kind, body.fileName);
-    const r2UploadId = await storage.createMultipartUpload(storageKey, body.contentType);
+    const storageUploadId = await storage.createMultipartUpload(storageKey, body.contentType, body.fileName);
     const partCount = partCountFor(body.sizeBytes);
-    const recorded = unwrap(
-      await ctx.runMutation(internal.runner.recordUploadStart, {
-        ...cap,
-        ...body,
-        storageKey,
-        r2UploadId,
-        partSizeBytes: UPLOAD_PART_SIZE_BYTES,
-        partCount,
-      }),
-    );
+    const recordedResult = await ctx.runMutation(internal.runner.recordUploadStart, {
+      ...cap,
+      ...body,
+      storageKey,
+      storageUploadId,
+      partSizeBytes: UPLOAD_PART_SIZE_BYTES,
+      partCount,
+    });
+    if (!recordedResult.ok) {
+      await storage.abortMultipartUpload(storageKey, storageUploadId);
+      throw new HttpError(recordedResult.status, recordedResult.error);
+    }
+    const recorded = recordedResult;
     if (recorded.duplicateOf) await storage.abortMultipartUpload(storageKey, recorded.duplicateOf);
     return json(200, { uploadId: recorded.uploadId, partSizeBytes: UPLOAD_PART_SIZE_BYTES, partCount });
   }),
@@ -179,11 +196,13 @@ http.route({
     const upload = await ctx.runQuery(internal.runner.getUpload, { uploadId: body.uploadId, attemptId: context.attemptId });
     if (!upload || upload.status !== "uploading") throw new HttpError(404, "upload_not_found");
     if (body.partNumbers.some((n) => n > upload.partCount)) throw new HttpError(422, "invalid_part");
-    const storage = new R2Storage(r2Config());
+    const uploadId = upload.storageUploadId;
+    if (!uploadId) throw new HttpError(409, "upload_not_active");
+    const storage = new ObjectStorage(storageConfig());
     const urls = await Promise.all(
       body.partNumbers.map(async (partNumber) => ({
         partNumber,
-        url: await storage.presignUploadPart(upload.storageKey, upload.r2UploadId, partNumber, TIMING.presignedUploadSeconds),
+        url: await storage.presignUploadPart(upload.storageKey, uploadId, partNumber, TIMING.presignedUploadSeconds),
       })),
     );
     return json(200, { urls, expiresAt: Date.now() + TIMING.presignedUploadSeconds * 1000 });
@@ -202,8 +221,9 @@ http.route({
     if (upload.status === "completed" && upload.artifactId) return json(200, { artifactId: upload.artifactId });
     if (upload.status !== "uploading") throw new HttpError(409, "upload_not_active");
     if (body.parts.length !== upload.partCount) throw new HttpError(422, "missing_parts");
-    const storage = new R2Storage(r2Config());
-    const head = await completeOrRecoverUpload(storage, upload, body.parts);
+    if (!upload.storageUploadId) throw new HttpError(409, "upload_not_active");
+    const storage = new ObjectStorage(storageConfig());
+    const head = await completeOrRecoverUpload(storage, { ...upload, storageUploadId: upload.storageUploadId }, body.parts);
     const result = await ctx.runMutation(internal.runner.completeUpload, {
       ...cap,
       uploadId: upload._id,
@@ -225,6 +245,124 @@ http.route({
     const body = await readBody(req, finishRequestSchema, 512 * 1024);
     const result = unwrap(await ctx.runMutation(internal.runner.finish, { ...cap, body }));
     return json(200, { buildStatus: result.buildStatus });
+  }),
+});
+
+/* ---------- Save runner routes (linxgen-save.yml) ---------- */
+
+async function saveCapability(req: Request) {
+  const token = bearer(req);
+  const parsed = parseCapabilityToken(token);
+  if (!parsed) throw new HttpError(401, "invalid_capability");
+  return { saveAttemptId: parsed.attemptId, capabilityHash: await sha256Hex(token) };
+}
+
+type SaveFileRef = { kind: "iso" | "container" | "log" | "manifest"; fileName: string; sizeBytes: number; sha256: string; storageKey: string };
+
+async function presignSaveFiles(files: SaveFileRef[]) {
+  const storage = new ObjectStorage(storageConfig());
+  return Promise.all(
+    files.map(async ({ storageKey, ...f }) => ({
+      ...f,
+      url: await storage.presignDownload(storageKey, f.fileName, TIMING.presignedSaveDownloadSeconds),
+    })),
+  );
+}
+
+/**
+ * Mints the storage repository token. A refused request means the member uninstalled or suspended the app or removed
+ * the repository from it: the save fails and the connection is marked broken so the member is asked to reconnect.
+ */
+async function repoTokenOrFail(
+  ctx: ActionCtx,
+  saveAttemptId: string,
+  connection: { installationId: number; repoId: number },
+): Promise<{ token: string; expiresAt: number }> {
+  try {
+    return await storageRepoToken(storageAppConfig(), connection.installationId, connection.repoId);
+  } catch (e) {
+    const code = storageTokenFailure(e);
+    if (!code) throw e;
+    await ctx.runMutation(internal.saves.failAttempt, { saveAttemptId: saveAttemptId as Id<"saveAttempts">, code, breakConnection: true });
+    throw new HttpError(409, code);
+  }
+}
+
+http.route({
+  path: "/runner/save/claim",
+  method: "POST",
+  handler: route(async (ctx, req) => {
+    const token = bearer(req);
+    const body = await readBody(req, saveClaimRequestSchema, 16 * 1024);
+    // Only tokens from the save workflow are accepted here; build workflow tokens fail the workflow_ref check.
+    const identity = await verifyRunnerOidcToken(token, runnerTrustConfig("save"));
+    const expected = await saveDispatchNonce(runnerSecret(), body.saveAttemptId);
+    if (!constantTimeEqual(expected, body.dispatchNonce)) throw new HttpError(401, "unauthorized");
+    const cap = capabilityToken(body.saveAttemptId);
+    const result = unwrap(
+      await ctx.runMutation(internal.saves.claimAttempt, {
+        saveAttemptId: body.saveAttemptId,
+        runId: identity.runId,
+        runAttempt: identity.runAttempt,
+        workflowSha: identity.workflowSha,
+        capabilityHash: await sha256Hex(cap),
+      }),
+    );
+    const github = await repoTokenOrFail(ctx, body.saveAttemptId, result.connection);
+    return json(200, {
+      protocolVersion: SAVE_PROTOCOL_VERSION,
+      capability: cap,
+      capabilityExpiresAt: result.capabilityExpiresAt,
+      saveAttemptId: body.saveAttemptId,
+      deadlineAt: result.deadlineAt,
+      files: await presignSaveFiles(result.files),
+      release: result.release,
+      github,
+    });
+  }),
+});
+
+/** Fresh download URLs; the ones from the claim expire after an hour. */
+http.route({
+  path: "/runner/save/files",
+  method: "POST",
+  handler: route(async (ctx, req) => {
+    const cap = await saveCapability(req);
+    const context = unwrap(await ctx.runQuery(internal.saves.capabilityContext, cap));
+    return json(200, { files: await presignSaveFiles(context.files) });
+  }),
+});
+
+/** A fresh repository token; installation tokens expire after an hour. */
+http.route({
+  path: "/runner/save/token",
+  method: "POST",
+  handler: route(async (ctx, req) => {
+    const cap = await saveCapability(req);
+    const context = unwrap(await ctx.runQuery(internal.saves.capabilityContext, cap));
+    return json(200, await repoTokenOrFail(ctx, cap.saveAttemptId, context.connection));
+  }),
+});
+
+http.route({
+  path: "/runner/save/progress",
+  method: "POST",
+  handler: route(async (ctx, req) => {
+    const cap = await saveCapability(req);
+    const body = await readBody(req, saveProgressRequestSchema, 16 * 1024);
+    const result = unwrap(await ctx.runMutation(internal.saves.recordProgress, { ...cap, body }));
+    return json(200, { ok: true, cancelRequested: result.cancelRequested });
+  }),
+});
+
+http.route({
+  path: "/runner/save/finish",
+  method: "POST",
+  handler: route(async (ctx, req) => {
+    const cap = await saveCapability(req);
+    const body = await readBody(req, saveFinishRequestSchema, 64 * 1024);
+    const result = unwrap(await ctx.runMutation(internal.saves.finish, { ...cap, body }));
+    return json(200, { saveStatus: result.saveStatus });
   }),
 });
 

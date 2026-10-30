@@ -1,8 +1,8 @@
 import { SignJWT, importPKCS8 } from "jose";
 import { base64ToBytes, bytesToBase64 } from "./crypto";
 
-const API = "https://api.github.com";
-const API_VERSION = "2022-11-28";
+export const API = "https://api.github.com";
+export const API_VERSION = "2022-11-28";
 
 export class GitHubError extends Error {
   constructor(
@@ -62,9 +62,9 @@ export async function createAppJwt(appId: string, privateKeyPem: string, nowSeco
     .sign(key);
 }
 
-type FetchLike = typeof fetch;
+export type FetchLike = typeof fetch;
 
-async function gh(fetchImpl: FetchLike, token: string, method: string, path: string, body?: unknown) {
+export async function gh(fetchImpl: FetchLike, token: string, method: string, path: string, body?: unknown) {
   let res: Response;
   try {
     res = await fetchImpl(`${API}${path}`, {
@@ -85,7 +85,7 @@ async function gh(fetchImpl: FetchLike, token: string, method: string, path: str
   return res;
 }
 
-async function errorFrom(res: Response, what: string): Promise<GitHubError> {
+export async function errorFrom(res: Response, what: string): Promise<GitHubError> {
   let detail = "";
   try {
     detail = ((await res.json()) as { message?: string }).message ?? "";
@@ -139,14 +139,19 @@ export async function getWorkflow(cfg: GitHubAppSettings, token: string, fetchIm
   return { state: body.state, path: body.path };
 }
 
+/** Workflow run titles (`run-name`) that let the reconciler find a run whose dispatch response was lost. */
 export function runNameFor(attemptId: string) {
   return `LinxGen attempt ${attemptId}`;
+}
+
+export function saveRunNameFor(saveAttemptId: string) {
+  return `LinxGen save ${saveAttemptId}`;
 }
 
 export async function dispatchWorkflow(
   cfg: GitHubAppSettings,
   token: string,
-  inputs: { attempt_id: string; dispatch_nonce: string },
+  inputs: { attempt_id: string; dispatch_nonce: string } | { save_attempt_id: string; dispatch_nonce: string },
   fetchImpl: FetchLike = fetch,
 ): Promise<{ runId?: string }> {
   const path = `/repos/${cfg.repository}/actions/workflows/${encodeURIComponent(cfg.workflowFile)}/dispatches`;
@@ -190,6 +195,7 @@ export async function findRunForAttempt(
   attemptId: string,
   createdAfterMs: number,
   fetchImpl: FetchLike = fetch,
+  title = runNameFor(attemptId),
 ): Promise<WorkflowRunInfo | null> {
   const since = new Date(createdAfterMs - 5 * 60_000).toISOString();
   const path =
@@ -198,7 +204,7 @@ export async function findRunForAttempt(
   const res = await gh(fetchImpl, token, "GET", path);
   if (!res.ok) throw await errorFrom(res, "List workflow runs");
   const body = (await res.json()) as { workflow_runs: Parameters<typeof toRunInfo>[0][] };
-  const match = body.workflow_runs.find((r) => r.display_title === runNameFor(attemptId));
+  const match = body.workflow_runs.find((r) => r.display_title === title);
   return match ? toRunInfo(match) : null;
 }
 

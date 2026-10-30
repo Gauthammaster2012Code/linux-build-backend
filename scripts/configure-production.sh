@@ -70,18 +70,21 @@ ask() {
 
 valid_site_url() { [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; }
 valid_digits() { [[ "$1" =~ ^[0-9]{1,20}$ ]]; }
-valid_hex32() { [[ "$1" =~ ^[0-9a-fA-F]{32}$ ]]; }
-valid_bucket() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$ ]]; }
+valid_b2_endpoint() { [[ "$1" =~ ^https://s3\.[a-z0-9-]+\.backblazeb2\.com$ ]]; }
+valid_bucket() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9-]{4,48}[A-Za-z0-9]$ ]]; }
 valid_access_key() { [[ "$1" =~ ^[A-Za-z0-9]{16,128}$ ]]; }
-valid_secret_key() { [[ ${#1} -ge 32 && ! "$1" =~ [[:space:]] ]]; }
+valid_secret_key() { [[ ${#1} -ge 20 && ! "$1" =~ [[:space:]] ]]; }
+valid_slug() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]; }
+valid_client_id() { [[ "$1" =~ ^Iv[A-Za-z0-9.]{8,40}$ ]]; }
+valid_repo_name() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,100}$ && "$1" != "." && "$1" != ".." ]]; }
 valid_api_key() { [[ ${#1} -ge 16 && ! "$1" =~ [[:space:]] ]]; }
 valid_model() { [[ "$1" =~ ^[A-Za-z0-9._:/-]{1,100}$ ]]; }
 valid_pem() { [[ "$1" == *"-----BEGIN"*"PRIVATE KEY-----"* && "$1" == *"-----END"*"PRIVATE KEY-----"* ]]; }
 
-ask_private_key() {
-  local path pem="" line
+ask_private_key() { # NAME "label"
+  local name="$1" label="$2" path pem="" line
   echo
-  info "GitHub App private key $(status_of GITHUB_APP_PRIVATE_KEY)"
+  info "$label private key $(status_of "$name")"
   info "Type the path to the .pem file, type 'paste' to paste it, or press Enter to skip."
   while true; do
     read -r -e -p "  Path or 'paste': " path
@@ -106,7 +109,7 @@ ask_private_key() {
       warn "That does not look like a private key. It should start with '-----BEGIN RSA PRIVATE KEY-----'."
       continue
     fi
-    save GITHUB_APP_PRIVATE_KEY "$pem"
+    save "$name" "$pem"
     if [[ "$path" != "paste" && -f "$path" ]]; then
       local answer
       read -r -p "  Delete $path from this machine now? Keep a copy in your password manager first. [y/N]: " answer
@@ -137,16 +140,37 @@ info "App ID: on the app's settings page (github.com/settings/apps/<app-name>)."
 info "Installation ID: the number at the end of github.com/settings/installations/<ID>."
 ask GITHUB_APP_ID "App ID" valid_digits "The App ID is a number."
 ask GITHUB_APP_INSTALLATION_ID "Installation ID" valid_digits "The installation ID is a number."
-ask_private_key
+ask_private_key GITHUB_APP_PRIVATE_KEY "GitHub App"
 
 echo
-bold "3. Cloudflare R2 (stores build files)"
-info "Account ID: Cloudflare dashboard > R2 > Overview (32 hex characters)."
-info "API token: R2 > Manage API tokens > Object Read & Write, limited to the LinxGen bucket."
-ask R2_ACCOUNT_ID "Account ID" valid_hex32 "The account ID is 32 hexadecimal characters."
-ask R2_BUCKET "Bucket name" valid_bucket "Bucket names use 3-63 lowercase letters, digits and hyphens."
-ask R2_ACCESS_KEY_ID "Access key ID" valid_access_key "The access key ID is letters and digits only."
-ask R2_SECRET_ACCESS_KEY "Secret access key (hidden)" valid_secret_key "The secret access key is at least 32 characters with no spaces." secret
+bold "3. Backblaze B2 (keeps build files for 24 hours)"
+info "Bucket: B2 > Buckets > Create a Bucket, Files in Bucket: Private, Default Encryption: Enable."
+info "  LinxGen deletes files itself after 24 hours. As a backstop, set Lifecycle Settings > custom rules to"
+info "  daysFromUploadingToHiding 2, daysFromHidingToDeleting 1, daysFromStartingToCancelingUnfinishedLargeFiles 1"
+info "  (raise daysFromUploadingToHiding if you raise the retention in the admin page; see docs/setup.md)."
+info "Endpoint: the bucket's 'Endpoint' value with https:// in front, for example https://s3.us-west-004.backblazeb2.com."
+info "Key: Application Keys > Add a New Application Key, allow access to this bucket only, Read and Write."
+info "  keyID is the access key ID and applicationKey is the secret; the secret is shown only once."
+ask STORAGE_S3_ENDPOINT "S3 endpoint" valid_b2_endpoint "Use https://s3.<region>.backblazeb2.com with no path."
+ask STORAGE_BUCKET "Bucket name" valid_bucket "Bucket names are 6-50 letters, digits and hyphens."
+ask STORAGE_ACCESS_KEY_ID "keyID" valid_access_key "The keyID is letters and digits only."
+ask STORAGE_SECRET_ACCESS_KEY "applicationKey (hidden)" valid_secret_key "The applicationKey is at least 20 characters with no spaces." secret
+if is_set R2_ACCOUNT_ID || is_set R2_BUCKET || is_set R2_ACCESS_KEY_ID || is_set R2_SECRET_ACCESS_KEY; then
+  warn "Old Cloudflare R2 variables are still set. LinxGen no longer reads them; remove them with"
+  warn "  npx convex env remove R2_ACCOUNT_ID --deployment $DEPLOYMENT (and R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)."
+fi
+
+echo
+bold "3b. LinxGen Storage GitHub App (optional: lets members save builds to their own GitHub)"
+info "Skip this whole section to keep saving to GitHub turned off. See docs/setup.md for how to create the app."
+info "App ID, client ID and the URL name (slug) are on github.com/settings/apps/<app-name>."
+info "Client secret: same page > Client secrets > Generate a new client secret."
+ask STORAGE_GITHUB_APP_ID "Storage app ID" valid_digits "The App ID is a number."
+ask STORAGE_GITHUB_APP_SLUG "Storage app URL name (slug)" valid_slug "Use the app's URL name, lowercase letters, digits and hyphens."
+ask STORAGE_GITHUB_APP_CLIENT_ID "Storage app client ID" valid_client_id "Client IDs start with Iv, for example Iv23li..."
+ask STORAGE_GITHUB_APP_CLIENT_SECRET "Storage app client secret (hidden)" valid_api_key "The client secret is at least 16 characters with no spaces." secret
+ask_private_key STORAGE_GITHUB_APP_PRIVATE_KEY "LinxGen Storage GitHub App"
+ask STORAGE_REPO_NAME "Repository name created in each member's account (default storage)" valid_repo_name "Use letters, digits, '.', '_' and '-'."
 
 echo
 bold "4. Ollama Cloud (optional default AI model)"
