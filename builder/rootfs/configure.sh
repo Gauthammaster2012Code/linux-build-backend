@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Applies generated system settings inside the target root filesystem (live chroot or container build).
+# Usage: configure.sh BUILD_ENV [system|container]
 set -euo pipefail
 
 die() {
@@ -7,7 +8,9 @@ die() {
   exit 1
 }
 
-env_file=${1:?usage: configure.sh BUILD_ENV}
+env_file=${1:?usage: configure.sh BUILD_ENV [system|container]}
+target=${2:-system}
+[[ $target == system || $target == container ]] || die "invalid target"
 get() {
   local line
   while IFS= read -r line || [[ -n $line ]]; do
@@ -41,7 +44,11 @@ else
 fi
 printf 'LANG=%s\n' "$loc" >/etc/default/locale
 
-printf '%s\n' "$host" >/etc/hostname
-printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' "$host" >/etc/hosts
+# Docker writes /etc/hostname and /etc/hosts for every container it starts (the hostname comes from docker run
+# --hostname), and both are read-only mounts during docker build, so only a full system gets them here.
+if [[ $target == system ]]; then
+  printf '%s\n' "$host" >/etc/hostname
+  printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' "$host" >/etc/hosts
+fi
 
 printf '[linxgen] configured hostname=%s timezone=%s locale=%s\n' "$host" "$tz" "$loc"

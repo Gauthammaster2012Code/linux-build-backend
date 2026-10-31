@@ -30,7 +30,7 @@ flags=(-y -q)
 apt-get update -q
 xargs -a "$ctx/packages.list" -r apt-get install "${flags[@]}" --
 
-bash "$ctx/configure.sh" "$ctx/build.env"
+bash "$ctx/configure.sh" "$ctx/build.env" container
 install -D -m 0755 "$ctx/smoke.sh" /usr/local/lib/linxgen/smoke.sh
 install -D -m 0644 "$ctx/requested.list" /etc/linxgen/requested.list
 install -D -m 0644 "$ctx/build.env" /etc/linxgen/build.env
